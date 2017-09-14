@@ -1,7 +1,8 @@
 <!-- menu -->
-[English](https://github.com/nginx/unit/blob/master/README.md)
-[简体中文](https://github.com/tuzimoe/unit/blob/master/README_zh-Hans.md)
-[繁體中文](https://github.com/tuzimoe/unit/blob/master/README_zh-Hant.md)
+
+[English](https://github.com/nginx/unit/blob/master/README.md)  
+[简体中文](https://github.com/tuzimoe/unit/blob/master/README_zh-Hans.md)  
+[繁體中文](https://github.com/tuzimoe/unit/blob/master/README_zh-Hant.md)  
 - [NGINX Unit](#nginx-unit)
   - [核心功能](#key-features)
   - [支持的开发语言](#supported-application-languages)
