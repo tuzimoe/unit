@@ -491,7 +491,7 @@ struct nxt_event_engine_s {
     nxt_queue_t                joints;
     nxt_queue_t                listen_connections;
     nxt_queue_t                idle_connections;
-    nxt_lvlhsh_t               requests; /* req_id to nxt_req_conn_link_t */
+    nxt_array_t                *mem_cache;
 
     nxt_queue_link_t           link;
     // STUB: router link
@@ -512,14 +512,10 @@ NXT_EXPORT void nxt_event_engine_post(nxt_event_engine_t *engine,
 NXT_EXPORT void nxt_event_engine_signal(nxt_event_engine_t *engine,
     nxt_uint_t signo);
 
-NXT_EXPORT void nxt_event_engine_request_add(nxt_event_engine_t *engine,
-    nxt_req_conn_link_t *rc);
-NXT_EXPORT nxt_req_conn_link_t *nxt_event_engine_request_find(
-    nxt_event_engine_t *engine, nxt_req_id_t req_id);
-NXT_EXPORT void nxt_event_engine_request_remove(nxt_event_engine_t *engine,
-    nxt_req_conn_link_t *rc);
-NXT_EXPORT nxt_req_conn_link_t *nxt_event_engine_request_find_remove(
-    nxt_event_engine_t *engine, nxt_req_id_t req_id);
+void *nxt_event_engine_mem_alloc(nxt_event_engine_t *engine, uint32_t *slot,
+    size_t size);
+void nxt_event_engine_mem_free(nxt_event_engine_t *engine, uint32_t *slot,
+    void *p);
 
 
 nxt_inline nxt_event_engine_t *

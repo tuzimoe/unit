@@ -30,7 +30,7 @@ struct nxt_process_init_s {
     const char             *name;
     nxt_user_cred_t        *user_cred;
 
-    nxt_port_handler_t     *port_handlers;
+    nxt_port_handlers_t    *port_handlers;
     const nxt_sig_event_t  *signals;
 
     nxt_process_type_t     type;
@@ -47,7 +47,7 @@ typedef struct {
     nxt_queue_t         ports;      /* of nxt_port_t */
     nxt_bool_t          ready;
     nxt_bool_t          registered;
-    nxt_uint_t          port_cleanups;
+    nxt_int_t           use_count;
 
     nxt_process_init_t  *init;
 
@@ -58,7 +58,6 @@ typedef struct {
     nxt_array_t         *outgoing;  /* of nxt_port_mmap_t */
 
     nxt_thread_mutex_t  cp_mutex;
-    nxt_mp_t            *cp_mem_pool;
     nxt_lvlhsh_t        connected_ports; /* of nxt_port_t */
 } nxt_process_t;
 
@@ -88,6 +87,7 @@ NXT_EXPORT void nxt_process_port_add(nxt_task_t *task, nxt_process_t *process,
 #define nxt_process_port_loop                                                 \
     nxt_queue_loop
 
+void nxt_process_close_ports(nxt_task_t *task, nxt_process_t *process);
 
 void nxt_process_connected_port_add(nxt_process_t *process, nxt_port_t *port);
 

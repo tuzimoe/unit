@@ -90,8 +90,8 @@ nxt_runtime_create(nxt_task_t *task)
 
     /* Should not fail. */
     lang = nxt_array_add(rt->languages);
-    lang->type = (nxt_str_t) nxt_string("go");
-    lang->version = (nxt_str_t) nxt_null_string;
+    lang->type = NXT_APP_GO;
+    lang->version = (u_char *) "";
     lang->file = NULL;
     lang->module = &nxt_go_module;
 
@@ -292,9 +292,12 @@ nxt_runtime_event_engines(nxt_task_t *task, nxt_runtime_t *rt)
 
     thread = task->thread;
     thread->engine = engine;
+#if 0
     thread->fiber = &engine->fibers->fiber;
+#endif
 
     engine->id = rt->last_engine_id++;
+    engine->mem_pool = nxt_mp_create(1024, 128, 256, 32);
 
     nxt_queue_init(&rt->engines);
     nxt_queue_insert_tail(&rt->engines, &engine->link);
@@ -550,7 +553,7 @@ nxt_runtime_exit(nxt_task_t *task, void *obj, void *data)
 
     nxt_runtime_process_each(rt, process) {
 
-        nxt_runtime_process_remove(rt, process);
+        nxt_process_close_ports(task, process);
 
     } nxt_runtime_process_loop;
 
@@ -722,6 +725,7 @@ nxt_runtime_conf_init(nxt_task_t *task, nxt_runtime_t *rt)
     rt->pid = NXT_PID;
     rt->log = NXT_LOG;
     rt->modules = NXT_MODULES;
+    rt->state = NXT_STATE;
     rt->control = NXT_CONTROL_SOCK;
 
     if (nxt_runtime_conf_read_cmd(task, rt) != NXT_OK) {
@@ -771,6 +775,28 @@ nxt_runtime_conf_init(nxt_task_t *task, nxt_runtime_t *rt)
 
     rt->modules = (char *) file_name.start;
 
+    slash = "";
+    n = nxt_strlen(rt->state);
+
+    if (n > 1 && rt->state[n - 1] != '/') {
+        slash = "/";
+    }
+
+    ret = nxt_file_name_create(rt->mem_pool, &file_name, "%s%sconf.json%Z",
+                               rt->state, slash);
+    if (nxt_slow_path(ret != NXT_OK)) {
+        return NXT_ERROR;
+    }
+
+    rt->conf = (char *) file_name.start;
+
+    ret = nxt_file_name_create(rt->mem_pool, &file_name, "%s.tmp%Z", rt->conf);
+    if (nxt_slow_path(ret != NXT_OK)) {
+        return NXT_ERROR;
+    }
+
+    rt->conf_tmp = (char *) file_name.start;
+
     control.length = nxt_strlen(rt->control);
     control.start = (u_char *) rt->control;
 
@@ -808,6 +834,7 @@ nxt_runtime_conf_read_cmd(nxt_task_t *task, nxt_runtime_t *rt)
     static const char  no_log[] = "option \"--log\" requires filename\n";
     static const char  no_modules[] =
                        "option \"--modules\" requires directory\n";
+    static const char  no_state[] = "option \"--state\" requires directory\n";
 
     static const char  help[] =
         "\n"
@@ -828,6 +855,9 @@ nxt_runtime_conf_read_cmd(nxt_task_t *task, nxt_runtime_t *rt)
         "\n"
         "  --modules DIRECTORY  set modules directory name\n"
         "                       default: \"" NXT_MODULES "\"\n"
+        "\n"
+        "  --state DIRECTORY    set state directory name\n"
+        "                       default: \"" NXT_STATE "\"\n"
         "\n"
         "  --user USER          set non-privileged processes to run"
                                 " as specified user\n"
@@ -934,6 +964,19 @@ nxt_runtime_conf_read_cmd(nxt_task_t *task, nxt_runtime_t *rt)
             p = *argv++;
 
             rt->modules = p;
+
+            continue;
+        }
+
+        if (nxt_strcmp(p, "--state") == 0) {
+            if (*argv == NULL) {
+                write(STDERR_FILENO, no_state, sizeof(no_state) - 1);
+                return NXT_ERROR;
+            }
+
+            p = *argv++;
+
+            rt->state = p;
 
             continue;
         }
@@ -1537,6 +1580,8 @@ nxt_runtime_process_new(nxt_runtime_t *rt)
     nxt_thread_mutex_create(&process->outgoing_mutex);
     nxt_thread_mutex_create(&process->cp_mutex);
 
+    process->use_count = 1;
+
     return process;
 }
 
@@ -1544,16 +1589,21 @@ nxt_runtime_process_new(nxt_runtime_t *rt)
 static void
 nxt_runtime_process_destroy(nxt_runtime_t *rt, nxt_process_t *process)
 {
-    nxt_assert(process->port_cleanups == 0);
+    nxt_port_t         *port;
+    nxt_lvlhsh_each_t  lhe;
+
+    nxt_assert(process->use_count == 0);
     nxt_assert(process->registered == 0);
 
     nxt_port_mmaps_destroy(process->incoming, 1);
     nxt_port_mmaps_destroy(process->outgoing, 1);
 
-    if (process->cp_mem_pool != NULL) {
-        nxt_mp_thread_adopt(process->cp_mem_pool);
+    port = nxt_port_hash_first(&process->connected_ports, &lhe);
 
-        nxt_mp_destroy(process->cp_mem_pool);
+    while(port != NULL) {
+        nxt_port_hash_remove(&process->connected_ports, port);
+
+        port = nxt_port_hash_first(&process->connected_ports, &lhe);
     }
 
     nxt_thread_mutex_destroy(&process->incoming_mutex);
@@ -1637,7 +1687,11 @@ nxt_runtime_process_get(nxt_runtime_t *rt, nxt_pid_t pid)
         nxt_thread_log_debug("process %PI found", pid);
 
         nxt_thread_mutex_unlock(&rt->processes_mutex);
-        return lhq.value;
+
+        process = lhq.value;
+        process->use_count++;
+
+        return process;
     }
 
     process = nxt_runtime_process_new(rt);
@@ -1677,12 +1731,15 @@ nxt_runtime_process_get(nxt_runtime_t *rt, nxt_pid_t pid)
 
 
 void
-nxt_runtime_process_add(nxt_runtime_t *rt, nxt_process_t *process)
+nxt_runtime_process_add(nxt_task_t *task, nxt_process_t *process)
 {
     nxt_port_t          *port;
+    nxt_runtime_t       *rt;
     nxt_lvlhsh_query_t  lhq;
 
     nxt_assert(process->registered == 0);
+
+    rt = task->thread->runtime;
 
     nxt_runtime_process_lhq_pid(&lhq, &process->pid);
 
@@ -1705,7 +1762,7 @@ nxt_runtime_process_add(nxt_runtime_t *rt, nxt_process_t *process)
 
             port->pid = process->pid;
 
-            nxt_runtime_port_add(rt, port);
+            nxt_runtime_port_add(task, port);
 
         } nxt_process_port_loop;
 
@@ -1761,25 +1818,20 @@ nxt_runtime_process_remove_pid(nxt_runtime_t *rt, nxt_pid_t pid)
 
 
 void
-nxt_runtime_process_remove(nxt_runtime_t *rt, nxt_process_t *process)
+nxt_process_use(nxt_task_t *task, nxt_process_t *process, int i)
 {
-    nxt_port_t  *port;
+    nxt_runtime_t  *rt;
 
-    if (process->port_cleanups == 0) {
+    process->use_count += i;
+
+    if (process->use_count == 0) {
+        rt = task->thread->runtime;
+
         if (process->registered == 1) {
             nxt_runtime_process_remove_pid(rt, process->pid);
         }
 
         nxt_runtime_process_destroy(rt, process);
-
-    } else {
-        nxt_process_port_each(process, port) {
-
-            nxt_runtime_port_remove(rt, port);
-
-            nxt_port_release(port);
-
-        } nxt_process_port_loop;
     }
 }
 
@@ -1803,22 +1855,44 @@ nxt_runtime_port_first(nxt_runtime_t *rt, nxt_lvlhsh_each_t *lhe)
 
 
 void
-nxt_runtime_port_add(nxt_runtime_t *rt, nxt_port_t *port)
+nxt_runtime_port_add(nxt_task_t *task, nxt_port_t *port)
 {
-    nxt_port_hash_add(&rt->ports, rt->mem_pool, port);
+    nxt_int_t      res;
+    nxt_runtime_t  *rt;
+
+    rt = task->thread->runtime;
+
+    res = nxt_port_hash_add(&rt->ports, port);
+
+    if (res != NXT_OK) {
+        return;
+    }
 
     rt->port_by_type[port->type] = port;
+
+    nxt_port_use(task, port, 1);
 }
 
 
 void
-nxt_runtime_port_remove(nxt_runtime_t *rt, nxt_port_t *port)
+nxt_runtime_port_remove(nxt_task_t *task, nxt_port_t *port)
 {
-    nxt_port_hash_remove(&rt->ports, rt->mem_pool, port);
+    nxt_int_t      res;
+    nxt_runtime_t  *rt;
+
+    rt = task->thread->runtime;
+
+    res = nxt_port_hash_remove(&rt->ports, port);
+
+    if (res != NXT_OK) {
+        return;
+    }
 
     if (rt->port_by_type[port->type] == port) {
         rt->port_by_type[port->type] = NULL;
     }
+
+    nxt_port_use(task, port, -1);
 }
 
 

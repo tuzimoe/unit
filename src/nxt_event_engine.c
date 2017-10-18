@@ -7,6 +7,20 @@
 #include <nxt_main.h>
 
 
+typedef struct nxt_mem_cache_block_s  nxt_mem_cache_block_t;
+
+struct nxt_mem_cache_block_s {
+    nxt_mem_cache_block_t  *next;
+};
+
+
+typedef struct {
+    nxt_mem_cache_block_t  *free;
+    uint32_t               size;
+    uint32_t               count;
+} nxt_mem_cache_t;
+
+
 static nxt_int_t nxt_event_engine_post_init(nxt_event_engine_t *engine);
 static nxt_int_t nxt_event_engine_signal_pipe_create(
     nxt_event_engine_t *engine);
@@ -48,12 +62,14 @@ nxt_event_engine_create(nxt_task_t *task,
 
     engine->batch = batch;
 
+#if 0
     if (flags & NXT_ENGINE_FIBERS) {
         engine->fibers = nxt_fiber_main_create(engine);
         if (engine->fibers == NULL) {
             goto fibers_fail;
         }
     }
+#endif
 
     engine->current_work_queue = &engine->fast_work_queue;
 
@@ -138,9 +154,12 @@ signals_fail:
     nxt_work_queue_cache_destroy(&engine->work_queue_cache);
     nxt_free(engine->fibers);
 
+#if 0
 fibers_fail:
 
     nxt_free(engine);
+#endif
+
     return NULL;
 }
 
@@ -231,6 +250,12 @@ void
 nxt_event_engine_post(nxt_event_engine_t *engine, nxt_work_t *work)
 {
     nxt_debug(&engine->task, "event engine post");
+
+#if (NXT_DEBUG)
+    if (nxt_slow_path(work->next != NULL)) {
+        nxt_debug(&engine->task, "event engine post multiple works");
+    }
+#endif
 
     nxt_locked_work_queue_add(&engine->locked_work_queue, work);
 
@@ -530,114 +555,97 @@ nxt_event_engine_start(nxt_event_engine_t *engine)
 }
 
 
-static nxt_int_t
-nxt_req_conn_test(nxt_lvlhsh_query_t *lhq, void *data)
+void *
+nxt_event_engine_mem_alloc(nxt_event_engine_t *engine, uint32_t *slot,
+    size_t size)
 {
-    return NXT_OK;
-}
+    uint32_t               n;
+    nxt_uint_t             items;
+    nxt_array_t            *mem_cache;
+    nxt_mem_cache_t        *cache;
+    nxt_mem_cache_block_t  *block;
 
-static const nxt_lvlhsh_proto_t  lvlhsh_req_conn_proto  nxt_aligned(64) = {
-    NXT_LVLHSH_DEFAULT,
-    nxt_req_conn_test,
-    nxt_lvlhsh_alloc,
-    nxt_lvlhsh_free,
-};
+    mem_cache = engine->mem_cache;
+    n = *slot;
+
+    if (n == (uint32_t) -1) {
+
+        if (mem_cache == NULL) {
+            /* IPv4 nxt_sockaddr_t and HTTP/1 and HTTP/2 buffers. */
+            items = 3;
+#if (NXT_INET6)
+            items++;
+#endif
+#if (NXT_HAVE_UNIX_DOMAIN)
+            items++;
+#endif
+
+            mem_cache = nxt_array_create(engine->mem_pool, items,
+                                         sizeof(nxt_mem_cache_t));
+            if (nxt_slow_path(mem_cache == NULL)) {
+                return mem_cache;
+            }
+
+            engine->mem_cache = mem_cache;
+        }
+
+        cache = mem_cache->elts;
+        for (n = 0; n < mem_cache->nelts; n++) {
+            if (cache[n].size == size) {
+                goto found;
+            }
+        }
+
+        cache = nxt_array_add(mem_cache);
+        if (nxt_slow_path(cache == NULL)) {
+            return cache;
+        }
+
+        cache->free = NULL;
+        cache->size = size;
+        cache->count = 0;
+
+    found:
+
+        *slot = n;
+    }
+
+    cache = mem_cache->elts;
+    cache = cache + n;
+
+    block = cache->free;
+
+    if (block != NULL) {
+        cache->free = block->next;
+        cache->count--;
+
+        return block;
+    }
+
+    return nxt_mp_alloc(engine->mem_pool, size);
+}
 
 
 void
-nxt_event_engine_request_add(nxt_event_engine_t *engine,
-    nxt_req_conn_link_t *rc)
+nxt_event_engine_mem_free(nxt_event_engine_t *engine, uint32_t *slot, void *p)
 {
-    nxt_lvlhsh_query_t  lhq;
+    nxt_mem_cache_t        *cache;
+    nxt_mem_cache_block_t  *block;
 
-    lhq.key_hash = nxt_murmur_hash2(&rc->req_id, sizeof(rc->req_id));
-    lhq.key.length = sizeof(rc->req_id);
-    lhq.key.start = (u_char *) &rc->req_id;
-    lhq.proto = &lvlhsh_req_conn_proto;
-    lhq.replace = 0;
-    lhq.value = rc;
-    lhq.pool = engine->mem_pool;
+    block = p;
 
-    switch (nxt_lvlhsh_insert(&engine->requests, &lhq)) {
+    cache = engine->mem_cache->elts;
+    cache = cache + *slot;
 
-    case NXT_OK:
-        break;
+    if (cache->count < 16) {
+        cache->count++;
+        block->next = cache->free;
+        cache->free = block;
 
-    default:
-        nxt_thread_log_error(NXT_LOG_WARN, "req %08uxD to conn add failed",
-                             rc->req_id);
-        break;
-    }
-}
-
-
-nxt_req_conn_link_t *
-nxt_event_engine_request_find(nxt_event_engine_t *engine, nxt_req_id_t req_id)
-{
-    nxt_lvlhsh_query_t  lhq;
-
-    lhq.key_hash = nxt_murmur_hash2(&req_id, sizeof(req_id));
-    lhq.key.length = sizeof(req_id);
-    lhq.key.start = (u_char *) &req_id;
-    lhq.proto = &lvlhsh_req_conn_proto;
-
-    if (nxt_lvlhsh_find(&engine->requests, &lhq) == NXT_OK) {
-        return lhq.value;
+        return;
     }
 
-    return NULL;
-}
-
-
-void
-nxt_event_engine_request_remove(nxt_event_engine_t *engine,
-    nxt_req_conn_link_t *rc)
-{
-    nxt_lvlhsh_query_t  lhq;
-
-    lhq.key_hash = nxt_murmur_hash2(&rc->req_id, sizeof(rc->req_id));
-    lhq.key.length = sizeof(rc->req_id);
-    lhq.key.start = (u_char *) &rc->req_id;
-    lhq.proto = &lvlhsh_req_conn_proto;
-    lhq.pool = engine->mem_pool;
-
-    switch (nxt_lvlhsh_delete(&engine->requests, &lhq)) {
-
-    case NXT_OK:
-        break;
-
-    default:
-        nxt_thread_log_error(NXT_LOG_WARN, "req %08uxD to conn remove failed",
-                             rc->req_id);
-        break;
-    }
-}
-
-
-nxt_req_conn_link_t *
-nxt_event_engine_request_find_remove(nxt_event_engine_t *engine,
-    nxt_req_id_t req_id)
-{
-    nxt_lvlhsh_query_t  lhq;
-
-    lhq.key_hash = nxt_murmur_hash2(&req_id, sizeof(req_id));
-    lhq.key.length = sizeof(req_id);
-    lhq.key.start = (u_char *) &req_id;
-    lhq.proto = &lvlhsh_req_conn_proto;
-    lhq.pool = engine->mem_pool;
-
-    switch (nxt_lvlhsh_delete(&engine->requests, &lhq)) {
-
-    case NXT_OK:
-        return lhq.value;
-
-    default:
-        nxt_thread_log_error(NXT_LOG_WARN, "req %08uxD to conn remove failed",
-                             req_id);
-        break;
-    }
-
-    return NULL;
+    nxt_mp_free(engine->mem_pool, p);
 }
 
 

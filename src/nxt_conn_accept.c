@@ -46,6 +46,8 @@ nxt_listen_event(nxt_task_t *task, nxt_listen_socket_t *ls)
         engine = task->thread->engine;
         lev->batch = engine->batch;
 
+        lev->mem_cache = (uint32_t) -1;
+
         lev->socket.read_work_queue = &engine->accept_work_queue;
         lev->socket.read_handler = nxt_conn_listen_handler;
         lev->socket.error_handler = nxt_conn_listen_event_error;
@@ -82,11 +84,9 @@ nxt_listen_event(nxt_task_t *task, nxt_listen_socket_t *ls)
 static nxt_conn_t *
 nxt_conn_accept_alloc(nxt_task_t *task, nxt_listen_event_t *lev)
 {
-    nxt_mp_t             *mp;
-    nxt_conn_t           *c;
-    nxt_sockaddr_t       *sa, *remote;
-    nxt_event_engine_t   *engine;
-    nxt_listen_socket_t  *ls;
+    nxt_mp_t            *mp;
+    nxt_conn_t          *c;
+    nxt_event_engine_t  *engine;
 
     engine = task->thread->engine;
 
@@ -105,24 +105,10 @@ nxt_conn_accept_alloc(nxt_task_t *task, nxt_listen_event_t *lev)
             c->socket.write_ready = 1;
             c->listen = lev;
 
-            ls = lev->listen;
-
-            remote = nxt_sockaddr_alloc(mp, ls->socklen, ls->address_length);
-            if (nxt_slow_path(remote == NULL)) {
-                goto fail;
+            c->remote = nxt_sockaddr_cache_alloc(engine, lev);
+            if (nxt_fast_path(c->remote != NULL)) {
+                return c;
             }
-
-            c->remote = remote;
-
-            sa = ls->sockaddr;
-            remote->type = sa->type;
-            /*
-             * Set address family for unspecified Unix domain,
-             * because these sockaddr's are not be passed to accept().
-             */
-            remote->u.sockaddr.sa_family = sa->u.sockaddr.sa_family;
-
-            return c;
         }
 
     fail:
@@ -149,7 +135,7 @@ nxt_conn_listen_handler(nxt_task_t *task, void *obj, void *data)
 void
 nxt_conn_io_accept(nxt_task_t *task, void *obj, void *data)
 {
-    socklen_t           len;
+    socklen_t           socklen;
     nxt_conn_t          *c;
     nxt_socket_t        s;
     struct sockaddr     *sa;
@@ -161,17 +147,18 @@ nxt_conn_io_accept(nxt_task_t *task, void *obj, void *data)
     lev->ready--;
     lev->socket.read_ready = (lev->ready != 0);
 
-    len = c->remote->socklen;
-
-    if (len >= sizeof(struct sockaddr)) {
-        sa = &c->remote->u.sockaddr;
-
-    } else {
-        sa = NULL;
-        len = 0;
-    }
-
-    s = accept(lev->socket.fd, sa, &len);
+    sa = &c->remote->u.sockaddr;
+    socklen = c->remote->socklen;
+    /*
+     * The returned socklen is ignored here, because sockaddr_in and
+     * sockaddr_in6 socklens are not changed.  As to unspecified sockaddr_un
+     * it is 3 byte length and already prepared, because old BSDs return zero
+     * socklen and do not update the sockaddr_un at all; Linux returns 2 byte
+     * socklen and updates only the sa_family part; other systems copy 3 bytes
+     * and truncate surplus zero part.  Only bound sockaddr_un will be really
+     * truncated here.
+     */
+    s = accept(lev->socket.fd, sa, &socklen);
 
     if (s == -1) {
         nxt_conn_accept_error(task, lev, "accept", nxt_socket_errno);

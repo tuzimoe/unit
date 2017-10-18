@@ -34,6 +34,12 @@ typedef struct {
 typedef struct {
     nxt_event_engine_t     *engine;
     nxt_work_t             *jobs;
+
+    enum {
+        NXT_ROUTER_ENGINE_KEEP = 0,
+        NXT_ROUTER_ENGINE_ADD,
+        NXT_ROUTER_ENGINE_DELETE,
+    }                      action;
 } nxt_router_engine_conf_t;
 
 
@@ -81,6 +87,9 @@ struct nxt_app_s {
     uint32_t               pending_workers;
     uint32_t               workers;
     uint32_t               max_workers;
+    uint32_t               max_pending_responses;
+
+    nxt_msec_t             timeout;
 
     nxt_app_type_t         type:8;
     uint8_t                live;   /* 1 bit */
@@ -89,6 +98,8 @@ struct nxt_app_s {
 
     nxt_str_t              conf;
     nxt_app_prepare_msg_t  prepare_msg;
+
+    nxt_atomic_t           use_count;
 };
 
 
@@ -133,6 +144,7 @@ void nxt_router_new_port_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg);
 void nxt_router_conf_data_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg);
 void nxt_router_remove_pid_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg);
 
-nxt_bool_t nxt_router_app_remove_port(nxt_port_t *port);
+void nxt_router_app_port_close(nxt_task_t *task, nxt_port_t *port);
+void nxt_router_app_use(nxt_task_t *task, nxt_app_t *app, int i);
 
 #endif  /* _NXT_ROUTER_H_INCLUDED_ */

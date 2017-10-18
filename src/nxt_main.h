@@ -11,14 +11,15 @@
 #include <nxt_auto_config.h>
 
 
-#define NXT_VERSION                  "0.1"
-#define NXT_VERNUM                   0x00000001
+#define NXT_VERSION                  "0.2"
+#define NXT_VERNUM                   2
 
 
 typedef struct nxt_port_s            nxt_port_t;
 typedef struct nxt_task_s            nxt_task_t;
 typedef struct nxt_port_recv_msg_s   nxt_port_recv_msg_t;
 typedef void (*nxt_port_handler_t)(nxt_task_t *task, nxt_port_recv_msg_t *msg);
+typedef struct nxt_port_handlers_s   nxt_port_handlers_t;
 typedef struct nxt_sig_event_s       nxt_sig_event_t;
 typedef struct nxt_runtime_s         nxt_runtime_t;
 

@@ -49,6 +49,8 @@ static nxt_int_t nxt_main_listening_socket(nxt_sockaddr_t *sa,
 static void nxt_main_port_modules_handler(nxt_task_t *task,
     nxt_port_recv_msg_t *msg);
 static int nxt_cdecl nxt_app_lang_compare(const void *v1, const void *v2);
+static void nxt_main_port_conf_store_handler(nxt_task_t *task,
+    nxt_port_recv_msg_t *msg);
 
 
 const nxt_sig_event_t  nxt_main_process_signals[] = {
@@ -169,17 +171,28 @@ nxt_port_main_start_worker_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
     nxt_mp_t               *mp;
     nxt_int_t              ret;
     nxt_buf_t              *b;
+    nxt_port_t             *port;
     nxt_conf_value_t       *conf;
     nxt_common_app_conf_t  app_conf;
 
     static nxt_str_t nobody = nxt_string("nobody");
 
-    b = msg->buf;
+    ret = NXT_ERROR;
+
+    mp = nxt_mp_create(1024, 128, 256, 32);
+
+    if (nxt_slow_path(mp == NULL)) {
+        return;
+    }
+
+    b = nxt_buf_chk_make_plain(mp, msg->buf, msg->size);
+
+    if (b == NULL) {
+        return;
+    }
 
     nxt_debug(task, "main start worker: %*s", b->mem.free - b->mem.pos,
               b->mem.pos);
-
-    mp = nxt_mp_create(1024, 128, 256, 32);
 
     nxt_memzero(&app_conf, sizeof(nxt_common_app_conf_t));
 
@@ -194,7 +207,8 @@ nxt_port_main_start_worker_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
 
     if (conf == NULL) {
         nxt_log(task, NXT_LOG_CRIT, "configuration parsing error");
-        return;
+
+        goto failed;
     }
 
     app_conf.user = nobody;
@@ -203,29 +217,37 @@ nxt_port_main_start_worker_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
                               nxt_nitems(nxt_common_app_conf), &app_conf);
     if (ret != NXT_OK) {
         nxt_log(task, NXT_LOG_CRIT, "root map error");
-        return;
+
+        goto failed;
     }
 
     ret = nxt_main_start_worker_process(task, task->thread->runtime,
                                         &app_conf, msg->port_msg.stream);
 
+failed:
+
+    if (ret == NXT_ERROR) {
+        port = nxt_runtime_port_find(task->thread->runtime, msg->port_msg.pid,
+                                     msg->port_msg.reply_port);
+        if (nxt_fast_path(port != NULL)) {
+            nxt_port_socket_write(task, port, NXT_PORT_MSG_RPC_ERROR,
+                                    -1, msg->port_msg.stream, 0, NULL);
+        }
+    }
+
     nxt_mp_destroy(mp);
 }
 
 
-static nxt_port_handler_t  nxt_main_process_port_handlers[] = {
-    NULL, /* NXT_PORT_MSG_QUIT         */
-    NULL, /* NXT_PORT_MSG_NEW_PORT     */
-    NULL, /* NXT_PORT_MSG_CHANGE_FILE  */
-    NULL, /* NXT_PORT_MSG_MMAP         */
-    nxt_port_main_data_handler,
-    NULL, /* NXT_PORT_MSG_REMOVE_PID   */
-    nxt_port_ready_handler,
-    nxt_port_main_start_worker_handler,
-    nxt_main_port_socket_handler,
-    nxt_main_port_modules_handler,
-    nxt_port_rpc_handler,
-    nxt_port_rpc_handler,
+static nxt_port_handlers_t  nxt_main_process_port_handlers = {
+    .data           = nxt_port_main_data_handler,
+    .process_ready  = nxt_port_process_ready_handler,
+    .start_worker   = nxt_port_main_start_worker_handler,
+    .socket         = nxt_main_port_socket_handler,
+    .modules        = nxt_main_port_modules_handler,
+    .conf_store     = nxt_main_port_conf_store_handler,
+    .rpc_ready      = nxt_port_rpc_handler,
+    .rpc_error      = nxt_port_rpc_handler,
 };
 
 
@@ -243,23 +265,29 @@ nxt_main_process_port_create(nxt_task_t *task, nxt_runtime_t *rt)
 
     port = nxt_port_new(task, 0, nxt_pid, NXT_PROCESS_MAIN);
     if (nxt_slow_path(port == NULL)) {
+        nxt_process_use(task, process, -1);
         return NXT_ERROR;
-    }
-
-    ret = nxt_port_socket_init(task, port, 0);
-    if (nxt_slow_path(ret != NXT_OK)) {
-        return ret;
     }
 
     nxt_process_port_add(task, process, port);
 
-    nxt_runtime_port_add(rt, port);
+    nxt_process_use(task, process, -1);
+
+    ret = nxt_port_socket_init(task, port, 0);
+    if (nxt_slow_path(ret != NXT_OK)) {
+        nxt_port_use(task, port, -1);
+        return ret;
+    }
+
+    nxt_runtime_port_add(task, port);
+
+    nxt_port_use(task, port, -1);
 
     /*
      * A main process port.  A write port is not closed
      * since it should be inherited by worker processes.
      */
-    nxt_port_enable(task, port, nxt_main_process_port_handlers);
+    nxt_port_enable(task, port, &nxt_main_process_port_handlers);
 
     process->ready = 1;
 
@@ -295,7 +323,47 @@ nxt_main_process_title(nxt_task_t *task)
 static nxt_int_t
 nxt_main_start_controller_process(nxt_task_t *task, nxt_runtime_t *rt)
 {
+    ssize_t             n;
+    nxt_int_t           ret;
+    nxt_str_t           conf;
+    nxt_file_t          file;
+    nxt_file_info_t     fi;
     nxt_process_init_t  *init;
+
+    conf.length = 0;
+
+    nxt_memzero(&file, sizeof(nxt_file_t));
+
+    file.name = (nxt_file_name_t *) rt->conf;
+
+    ret = nxt_file_open(task, &file, NXT_FILE_RDONLY, NXT_FILE_OPEN, 0);
+
+    if (ret == NXT_OK) {
+        ret = nxt_file_info(&file, &fi);
+
+        if (nxt_fast_path(ret == NXT_OK && nxt_is_file(&fi))) {
+            conf.length = nxt_file_size(&fi);
+            conf.start = nxt_malloc(conf.length);
+
+            if (nxt_slow_path(conf.start == NULL)) {
+                nxt_file_close(task, &file);
+                return NXT_ERROR;
+            }
+
+            n = nxt_file_read(&file, conf.start, conf.length, 0);
+
+            if (nxt_slow_path(n != (ssize_t) conf.length)) {
+                conf.length = 0;
+                nxt_free(conf.start);
+
+                nxt_log(task, NXT_LOG_ALERT,
+                        "failed to restore previous configuration: "
+                        "cannot read the file");
+            }
+        }
+
+        nxt_file_close(task, &file);
+    }
 
     init = nxt_malloc(sizeof(nxt_process_init_t));
     if (nxt_slow_path(init == NULL)) {
@@ -305,14 +373,20 @@ nxt_main_start_controller_process(nxt_task_t *task, nxt_runtime_t *rt)
     init->start = nxt_controller_start;
     init->name = "controller";
     init->user_cred = &rt->user_cred;
-    init->port_handlers = nxt_controller_process_port_handlers;
+    init->port_handlers = &nxt_controller_process_port_handlers;
     init->signals = nxt_worker_process_signals;
     init->type = NXT_PROCESS_CONTROLLER;
-    init->data = rt;
+    init->data = &conf;
     init->stream = 0;
     init->restart = 1;
 
-    return nxt_main_create_worker_process(task, rt, init);
+    ret = nxt_main_create_worker_process(task, rt, init);
+
+    if (ret == NXT_OK && conf.length != 0) {
+        nxt_free(conf.start);
+    }
+
+    return ret;
 }
 
 
@@ -329,7 +403,7 @@ nxt_main_start_discovery_process(nxt_task_t *task, nxt_runtime_t *rt)
     init->start = nxt_discovery_start;
     init->name = "discovery";
     init->user_cred = &rt->user_cred;
-    init->port_handlers = nxt_discovery_process_port_handlers;
+    init->port_handlers = &nxt_discovery_process_port_handlers;
     init->signals = nxt_worker_process_signals;
     init->type = NXT_PROCESS_DISCOVERY;
     init->data = rt;
@@ -353,7 +427,7 @@ nxt_main_start_router_process(nxt_task_t *task, nxt_runtime_t *rt)
     init->start = nxt_router_start;
     init->name = "router";
     init->user_cred = &rt->user_cred;
-    init->port_handlers = nxt_router_process_port_handlers;
+    init->port_handlers = &nxt_router_process_port_handlers;
     init->signals = nxt_worker_process_signals;
     init->type = NXT_PROCESS_ROUTER;
     init->data = rt;
@@ -415,7 +489,7 @@ nxt_main_start_worker_process(nxt_task_t *task, nxt_runtime_t *rt,
 
     init->start = nxt_app_start;
     init->name = (char *) title;
-    init->port_handlers = nxt_app_process_port_handlers;
+    init->port_handlers = &nxt_app_process_port_handlers;
     init->signals = nxt_worker_process_signals;
     init->type = NXT_PROCESS_WORKER;
     init->data = app_conf;
@@ -448,19 +522,23 @@ nxt_main_create_worker_process(nxt_task_t *task, nxt_runtime_t *rt,
 
     port = nxt_port_new(task, 0, 0, init->type);
     if (nxt_slow_path(port == NULL)) {
-        nxt_runtime_process_remove(rt, process);
+        nxt_process_use(task, process, -1);
         return NXT_ERROR;
     }
 
     nxt_process_port_add(task, process, port);
 
+    nxt_process_use(task, process, -1);
+
     ret = nxt_port_socket_init(task, port, 0);
     if (nxt_slow_path(ret != NXT_OK)) {
-        nxt_mp_release(port->mem_pool, port);
+        nxt_port_use(task, port, -1);
         return ret;
     }
 
     pid = nxt_process_create(task, process);
+
+    nxt_port_use(task, port, -1);
 
     switch (pid) {
 
@@ -695,7 +773,7 @@ nxt_main_cleanup_worker_process(nxt_task_t *task, nxt_pid_t pid)
     if (process) {
         init = process->init;
 
-        nxt_runtime_process_remove(rt, process);
+        nxt_process_close_ports(task, process);
 
         if (!nxt_exiting) {
             nxt_runtime_process_each(rt, process) {
@@ -709,7 +787,8 @@ nxt_main_cleanup_worker_process(nxt_task_t *task, nxt_pid_t pid)
 
                 port = nxt_process_port_first(process);
 
-                buf = nxt_buf_mem_alloc(port->mem_pool, sizeof(pid), 0);
+                buf = nxt_buf_mem_ts_alloc(task, task->thread->engine->mem_pool,
+                                           sizeof(pid));
                 buf->mem.free = nxt_cpymem(buf->mem.free, &pid, sizeof(pid));
 
                 nxt_port_socket_write(task, port, NXT_PORT_MSG_REMOVE_PID,
@@ -750,6 +829,8 @@ nxt_main_port_socket_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
     b = msg->buf;
     sa = (nxt_sockaddr_t *) b->mem.pos;
 
+    /* TODO check b size and make plain */
+
     out = NULL;
 
     ls.socket = -1;
@@ -776,7 +857,8 @@ nxt_main_port_socket_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
 
         nxt_log(task, NXT_LOG_CRIT, "%*s", size, ls.start);
 
-        out = nxt_buf_mem_alloc(port->mem_pool, size + 1, 0);
+        out = nxt_buf_mem_ts_alloc(task, task->thread->engine->mem_pool,
+                                   size + 1);
         if (nxt_slow_path(out == NULL)) {
             return;
         }
@@ -922,13 +1004,13 @@ fail:
 static nxt_conf_map_t  nxt_app_lang_module_map[] = {
     {
         nxt_string("type"),
-        NXT_CONF_MAP_STR_COPY,
+        NXT_CONF_MAP_INT,
         offsetof(nxt_app_lang_module_t, type),
     },
 
     {
         nxt_string("version"),
-        NXT_CONF_MAP_STR_COPY,
+        NXT_CONF_MAP_CSTRZ,
         offsetof(nxt_app_lang_module_t, version),
     },
 
@@ -965,13 +1047,19 @@ nxt_main_port_modules_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
         return;
     }
 
-    nxt_debug(task, "application languages: \"%*s\"",
-              b->mem.free - b->mem.pos, b->mem.pos);
-
     mp = nxt_mp_create(1024, 128, 256, 32);
     if (mp == NULL) {
         return;
     }
+
+    b = nxt_buf_chk_make_plain(mp, b, msg->size);
+
+    if (b == NULL) {
+        return;
+    }
+
+    nxt_debug(task, "application languages: \"%*s\"",
+              b->mem.free - b->mem.pos, b->mem.pos);
 
     conf = nxt_conf_json_parse(mp, b->mem.pos, b->mem.free, NULL);
     if (conf == NULL) {
@@ -1003,8 +1091,8 @@ nxt_main_port_modules_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
             goto fail;
         }
 
-        nxt_debug(task, "lang %V %V \"%s\"",
-                  &lang->type, &lang->version, lang->file);
+        nxt_debug(task, "lang %d %s \"%s\"",
+                  lang->type, lang->version, lang->file);
     }
 
     qsort(rt->languages->elts, rt->languages->nelts,
@@ -1026,31 +1114,72 @@ static int nxt_cdecl
 nxt_app_lang_compare(const void *v1, const void *v2)
 {
     int                          n;
-    size_t                       length;
     const nxt_app_lang_module_t  *lang1, *lang2;
 
     lang1 = v1;
     lang2 = v2;
 
-    if (lang1->type.length != lang2->type.length) {
-        return lang1->type.length - lang2->type.length;
-    }
-
-    n = nxt_strncmp(lang1->type.start, lang2->type.start, lang1->type.length);
+    n = lang1->type - lang2->type;
 
     if (n != 0) {
         return n;
     }
 
-    length = nxt_min(lang1->version.length, lang2->version.length);
-
-    n = nxt_strncmp(lang1->version.start, lang2->version.start, length);
-
-    if (n == 0) {
-        n = lang1->version.length - lang2->version.length;
-    }
+    n = nxt_strverscmp(lang1->version, lang2->version);
 
     /* Negate result to move higher versions to the beginning. */
 
     return -n;
+}
+
+
+static void
+nxt_main_port_conf_store_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
+{
+    ssize_t        n, size, offset;
+    nxt_buf_t      *b;
+    nxt_int_t      ret;
+    nxt_file_t     file;
+    nxt_runtime_t  *rt;
+
+    nxt_memzero(&file, sizeof(nxt_file_t));
+
+    rt = task->thread->runtime;
+
+    file.name = (nxt_file_name_t *) rt->conf_tmp;
+
+    if (nxt_slow_path(nxt_file_open(task, &file, NXT_FILE_WRONLY,
+                                    NXT_FILE_TRUNCATE, NXT_FILE_OWNER_ACCESS)
+                      != NXT_OK))
+    {
+        goto error;
+    }
+
+    offset = 0;
+
+    for (b = msg->buf; b != NULL; b = b->next) {
+        size = nxt_buf_mem_used_size(&b->mem);
+
+        n = nxt_file_write(&file, b->mem.pos, size, offset);
+
+        if (nxt_slow_path(n != size)) {
+            nxt_file_close(task, &file);
+            (void) nxt_file_delete(file.name);
+            goto error;
+        }
+
+        offset += n;
+    }
+
+    nxt_file_close(task, &file);
+
+    ret = nxt_file_rename(file.name, (nxt_file_name_t *) rt->conf);
+
+    if (nxt_fast_path(ret == NXT_OK)) {
+        return;
+    }
+
+error:
+
+    nxt_log(task, NXT_LOG_ALERT, "failed to store current configuration");
 }
