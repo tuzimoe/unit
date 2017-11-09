@@ -103,7 +103,6 @@ typedef struct {
 
     uint32_t                      ready;
     uint32_t                      batch;
-    uint32_t                      mem_cache;  /* 8 bits */
 
     /* An accept() interface is cached to minimize memory accesses. */
     nxt_work_handler_t            accept;
@@ -156,7 +155,9 @@ struct nxt_conn_s {
     nxt_task_t                    task;
     nxt_log_t                     log;
 
-    nxt_listen_event_t            *listen;
+    /* STUB: socket.data should be used later. */
+    void                          *joint;
+
     nxt_sockaddr_t                *remote;
     nxt_sockaddr_t                *local;
     const char                    *action;

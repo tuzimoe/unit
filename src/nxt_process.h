@@ -23,6 +23,8 @@ typedef struct {
 
 typedef struct nxt_process_init_s  nxt_process_init_t;
 typedef nxt_int_t (*nxt_process_start_t)(nxt_task_t *task, void *data);
+typedef nxt_int_t (*nxt_process_restart_t)(nxt_task_t *task, nxt_runtime_t *rt,
+    nxt_process_init_t *init);
 
 
 struct nxt_process_init_s {
@@ -38,7 +40,18 @@ struct nxt_process_init_s {
     void                   *data;
     uint32_t               stream;
 
-    nxt_bool_t             restart;
+    nxt_process_restart_t  restart;
+};
+
+
+typedef struct nxt_port_mmap_s  nxt_port_mmap_t;
+typedef struct nxt_port_mmaps_s nxt_port_mmaps_t;
+
+struct nxt_port_mmaps_s {
+    nxt_thread_mutex_t  mutex;
+    uint32_t            size;
+    uint32_t            cap;
+    nxt_port_mmap_t     *elts;
 };
 
 
@@ -51,16 +64,17 @@ typedef struct {
 
     nxt_process_init_t  *init;
 
-    nxt_thread_mutex_t  incoming_mutex;
-    nxt_array_t         *incoming;  /* of nxt_port_mmap_t */
-
-    nxt_thread_mutex_t  outgoing_mutex;
-    nxt_array_t         *outgoing;  /* of nxt_port_mmap_t */
+    nxt_port_mmaps_t    incoming;
+    nxt_port_mmaps_t    outgoing;
 
     nxt_thread_mutex_t  cp_mutex;
     nxt_lvlhsh_t        connected_ports; /* of nxt_port_t */
 } nxt_process_t;
 
+
+extern nxt_bool_t  nxt_proc_conn_martix[NXT_PROCESS_MAX][NXT_PROCESS_MAX];
+extern nxt_bool_t
+          nxt_proc_remove_notify_martix[NXT_PROCESS_MAX][NXT_PROCESS_MAX];
 
 NXT_EXPORT nxt_pid_t nxt_process_create(nxt_task_t *task,
     nxt_process_t *process);
@@ -86,6 +100,8 @@ NXT_EXPORT void nxt_process_port_add(nxt_task_t *task, nxt_process_t *process,
 
 #define nxt_process_port_loop                                                 \
     nxt_queue_loop
+
+nxt_process_type_t nxt_process_type(nxt_process_t *process);
 
 void nxt_process_close_ports(nxt_task_t *task, nxt_process_t *process);
 

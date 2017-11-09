@@ -11,8 +11,8 @@
 #include <nxt_auto_config.h>
 
 
-#define NXT_VERSION                  "0.2"
-#define NXT_VERNUM                   2
+#define NXT_VERSION                  "0.3"
+#define NXT_VERNUM                   3
 
 
 typedef struct nxt_port_s            nxt_port_t;
@@ -103,7 +103,6 @@ typedef struct {
 #include <nxt_service.h>
 
 typedef struct nxt_buf_s                nxt_buf_t;
-typedef struct nxt_port_mmap_s          nxt_port_mmap_t;
 #include <nxt_buf.h>
 #include <nxt_buf_pool.h>
 #include <nxt_recvbuf.h>
