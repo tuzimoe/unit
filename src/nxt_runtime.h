@@ -9,7 +9,7 @@
 #define _NXT_RUNTIME_H_INCLUDED_
 
 
-typedef void (*nxt_runtime_cont_t)(nxt_task_t *task);
+typedef void (*nxt_runtime_cont_t)(nxt_task_t *task, nxt_uint_t status);
 
 
 struct nxt_runtime_s {
@@ -43,13 +43,14 @@ struct nxt_runtime_s {
 
     uint32_t               last_engine_id;
 
-    uint32_t               types;         /* bitset of nxt_process_type_t */
+    nxt_process_type_t     type;
 
     nxt_timer_t            timer;
 
     uint8_t                daemon;
     uint8_t                batch;
-    uint8_t                main_process;
+    uint8_t                status;
+
     const char             *engine;
     uint32_t               engine_connections;
     uint32_t               auxiliary_threads;
@@ -76,26 +77,12 @@ typedef nxt_int_t (*nxt_module_init_t)(nxt_thread_t *thr, nxt_runtime_t *rt);
 
 
 nxt_int_t nxt_runtime_create(nxt_task_t *task);
-void nxt_runtime_quit(nxt_task_t *task);
+void nxt_runtime_quit(nxt_task_t *task, nxt_uint_t status);
 
 void nxt_runtime_event_engine_free(nxt_runtime_t *rt);
 
 nxt_int_t nxt_runtime_thread_pool_create(nxt_thread_t *thr, nxt_runtime_t *rt,
     nxt_uint_t max_threads, nxt_nsec_t timeout);
-
-
-nxt_inline nxt_bool_t
-nxt_runtime_is_type(nxt_runtime_t *rt, nxt_process_type_t type)
-{
-    return (rt->types & (1U << type)) != 0;
-}
-
-
-nxt_inline nxt_bool_t
-nxt_runtime_is_main(nxt_runtime_t *rt)
-{
-    return nxt_runtime_is_type(rt, NXT_PROCESS_MAIN);
-}
 
 
 nxt_process_t *nxt_runtime_process_new(nxt_runtime_t *rt);
@@ -122,12 +109,6 @@ void nxt_runtime_port_remove(nxt_task_t *task, nxt_port_t *port);
 nxt_port_t *nxt_runtime_port_find(nxt_runtime_t *rt, nxt_pid_t pid,
     nxt_port_id_t port_id);
 
-nxt_port_t *nxt_runtime_port_first(nxt_runtime_t *rt,
-    nxt_lvlhsh_each_t *lhe);
-
-#define nxt_runtime_port_next(rt, lhe)                                        \
-    nxt_port_hash_next(&rt->ports, lhe)
-
 
 /* STUB */
 nxt_int_t nxt_runtime_controller_socket(nxt_task_t *task, nxt_runtime_t *rt);
@@ -148,7 +129,8 @@ void nxt_cdecl nxt_log_time_handler(nxt_uint_t level, nxt_log_t *log,
 
 void nxt_stream_connection_init(nxt_task_t *task, void *obj, void *data);
 
-void nxt_port_app_data_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg);
+void nxt_app_quit_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg);
+void nxt_app_data_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg);
 
 
 #define nxt_runtime_process_each(rt, process)                                 \
@@ -163,19 +145,6 @@ void nxt_port_app_data_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg);
             _nxt = nxt_runtime_process_next(rt, &_lhe);                       \
 
 #define nxt_runtime_process_loop                                              \
-        }                                                                     \
-    } while(0)
-
-
-#define nxt_runtime_port_each(rt, port)                                       \
-    do {                                                                      \
-        nxt_lvlhsh_each_t  _lhe;                                              \
-                                                                              \
-        for (port = nxt_runtime_port_first(rt, &_lhe);                        \
-             port != NULL;                                                    \
-             port = nxt_runtime_port_next(rt, &_lhe)) {                       \
-
-#define nxt_runtime_port_loop                                                 \
         }                                                                     \
     } while(0)
 

@@ -9,10 +9,15 @@
 #define _NXT_APPLICATION_H_INCLUDED_
 
 
+#include <nxt_conf.h>
+
+
 typedef enum {
     NXT_APP_PYTHON,
     NXT_APP_PHP,
     NXT_APP_GO,
+    NXT_APP_PERL,
+    NXT_APP_RUBY,
 
     NXT_APP_UNKNOWN,
 } nxt_app_type_t;
@@ -34,45 +39,53 @@ typedef struct nxt_common_app_conf_s nxt_common_app_conf_t;
 
 
 typedef struct {
+    char       *home;
     nxt_str_t  path;
     nxt_str_t  module;
 } nxt_python_app_conf_t;
 
 
 typedef struct {
-    nxt_str_t  root;
-    nxt_str_t  script;
-    nxt_str_t  index;
+    char                       *root;
+    nxt_str_t                  script;
+    nxt_str_t                  index;
+    nxt_conf_value_t           *options;
 } nxt_php_app_conf_t;
 
 
 typedef struct {
-    char       *executable;
+    char                       *executable;
+    nxt_conf_value_t           *arguments;
 } nxt_go_app_conf_t;
 
 
+typedef struct {
+    char       *script;
+} nxt_perl_app_conf_t;
+
+
+typedef struct {
+    nxt_str_t  script;
+} nxt_ruby_app_conf_t;
+
+
 struct nxt_common_app_conf_s {
-    nxt_str_t       name;
-    nxt_str_t       type;
-    nxt_str_t       user;
-    nxt_str_t       group;
+    nxt_str_t                  name;
+    nxt_str_t                  type;
+    nxt_str_t                  user;
+    nxt_str_t                  group;
 
-    char       *working_directory;
-
-    uint32_t   workers;
+    char                       *working_directory;
+    nxt_conf_value_t           *environment;
 
     union {
         nxt_python_app_conf_t  python;
         nxt_php_app_conf_t     php;
         nxt_go_app_conf_t      go;
+        nxt_perl_app_conf_t    perl;
+        nxt_ruby_app_conf_t    ruby;
     } u;
 };
-
-
-typedef struct {
-    nxt_str_t                  name;
-    nxt_str_t                  value;
-} nxt_app_header_field_t;
 
 
 typedef struct {
@@ -114,27 +127,20 @@ typedef struct {
 } nxt_app_request_t;
 
 
-typedef struct nxt_app_parse_ctx_s nxt_app_parse_ctx_t;
+typedef struct nxt_app_parse_ctx_s  nxt_app_parse_ctx_t;
 
 struct nxt_app_parse_ctx_s {
     nxt_app_request_t         r;
+    nxt_http_request_t        *request;
+    nxt_timer_t               timer;
+    void                      *timer_data;
     nxt_http_request_parse_t  parser;
+    nxt_http_request_parse_t  resp_parser;
     nxt_mp_t                  *mem_pool;
 };
 
 
-nxt_app_parse_ctx_t *nxt_app_http_req_init(nxt_task_t *task);
-
-nxt_int_t nxt_app_http_req_header_parse(nxt_task_t *task,
-    nxt_app_parse_ctx_t *ctx, nxt_buf_t *buf);
-
-nxt_int_t nxt_app_http_req_body_read(nxt_task_t *task,
-    nxt_app_parse_ctx_t *ctx, nxt_buf_t *buf);
-
-
 nxt_int_t nxt_app_http_req_done(nxt_task_t *task, nxt_app_parse_ctx_t *ctx);
-
-nxt_int_t nxt_app_http_init(nxt_task_t *task, nxt_runtime_t *rt);
 
 
 typedef struct nxt_app_wmsg_s  nxt_app_wmsg_t;
@@ -147,8 +153,9 @@ struct nxt_app_wmsg_s {
     uint32_t                   stream;
 };
 
+
 struct nxt_app_rmsg_s {
-    nxt_buf_t                 *buf;   /* current buffer to read */
+    nxt_buf_t                  *buf;   /* current buffer to read */
 };
 
 
@@ -163,7 +170,7 @@ NXT_EXPORT nxt_int_t nxt_app_msg_write(nxt_task_t *task, nxt_app_wmsg_t *msg,
     u_char *c, size_t size);
 
 NXT_EXPORT nxt_int_t nxt_app_msg_write_prefixed_upcase(nxt_task_t *task,
-    nxt_app_wmsg_t *msg, const nxt_str_t *prefix, const nxt_str_t *v);
+    nxt_app_wmsg_t *msg, const nxt_str_t *prefix, u_char *c, size_t size);
 
 nxt_inline nxt_int_t
 nxt_app_msg_write_nvp_(nxt_task_t *task, nxt_app_wmsg_t *msg,
@@ -171,7 +178,7 @@ nxt_app_msg_write_nvp_(nxt_task_t *task, nxt_app_wmsg_t *msg,
 
 
 #define nxt_app_msg_write_const(task, msg, c)                                 \
-    nxt_app_msg_write((task), (msg), (u_char *)(c), sizeof(c) - 1)
+    nxt_app_msg_write((task), (msg), (u_char *) (c), nxt_length(c))
 
 #define nxt_app_msg_write_str(task, msg, str)                                 \
     nxt_app_msg_write((task), (msg), (str)->start, (str)->length)
@@ -180,7 +187,7 @@ nxt_app_msg_write_nvp_(nxt_task_t *task, nxt_app_wmsg_t *msg,
     nxt_app_msg_write((task), (msg), (c), nxt_strlen(c))
 
 #define nxt_app_msg_write_nvp(task, msg, n, v)                                \
-    nxt_app_msg_write_nvp_((task), (msg), (u_char *)(n), sizeof(n) - 1,       \
+    nxt_app_msg_write_nvp_((task), (msg), (u_char *) (n), nxt_length(n),      \
                            (v)->start, (v)->length)
 
 nxt_inline nxt_int_t nxt_app_msg_write_size(nxt_task_t *task,
@@ -210,13 +217,14 @@ struct nxt_app_module_s {
     uint32_t                   *compat;
 
     nxt_str_t                  type;
-    nxt_str_t                  version;
+    const char                 *version;
 
     nxt_int_t                  (*init)(nxt_task_t *task,
                                     nxt_common_app_conf_t *conf);
     nxt_int_t                  (*run)(nxt_task_t *task,
                                     nxt_app_rmsg_t *rmsg,
                                     nxt_app_wmsg_t *wmsg);
+    void                       (*atexit)(nxt_task_t *task);
 };
 
 
@@ -285,10 +293,10 @@ nxt_app_msg_read_length(u_char *src, size_t *length)
         src++;
 
     } else {
-        *length = ((src[0] & 0x7fU) << 24) +
-                  (src[1] << 16) +
-                  (src[2] << 8) +
-                  src[3];
+        *length = ((src[0] & 0x7FU) << 24)
+                + ( src[1]          << 16)
+                + ( src[2]          <<  8)
+                +   src[3];
         src += 4;
     }
 
@@ -297,8 +305,9 @@ nxt_app_msg_read_length(u_char *src, size_t *length)
 
 
 nxt_app_lang_module_t *nxt_app_lang_module(nxt_runtime_t *rt, nxt_str_t *name);
+nxt_app_type_t nxt_app_parse_type(u_char *p, size_t length);
 
-
+NXT_EXPORT extern nxt_str_t      nxt_server;
 extern nxt_application_module_t  nxt_go_module;
 
 

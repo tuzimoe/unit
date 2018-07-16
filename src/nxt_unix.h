@@ -32,10 +32,6 @@
 #include <malloc.h>                 /* malloc_usable_size(). */
 #include <sys/syscall.h>            /* syscall(SYS_gettid). */
 
-#if (NXT_GETRANDOM)
-#include <linux/random.h>           /* getrandom(). */
-#endif
-
 #if (__GLIBC__ >= 2 && __GLIBC_MINOR__ >= 4)
 /*
  * POSIX semaphores using NPTL atomic/futex operations
@@ -97,7 +93,6 @@
 
 #if (NXT_MACOSX)
 
-#define _XOPEN_SOURCE               /* ucontext(3). */
 #ifndef _DARWIN_C_SOURCE
 #define _DARWIN_C_SOURCE            /* pthread_threadid_np(), mach_port_t. */
 #endif
@@ -188,7 +183,6 @@
 #endif
 #include <sys/wait.h>
 #include <time.h>
-#include <ucontext.h>
 #include <unistd.h>
 #include <pthread.h>
 
@@ -234,6 +228,12 @@
 
 #if (NXT_HAVE_SOLARIS_SENDFILEV)
 #include <sys/sendfile.h>
+#endif
+
+#if (NXT_HAVE_GETRANDOM)
+#include <sys/random.h>             /* getrandom(). */
+#elif (NXT_HAVE_LINUX_SYS_GETRANDOM)
+#include <linux/random.h>           /* SYS_getrandom. */
 #endif
 
 

@@ -52,7 +52,7 @@ nxt_sendbuf_mem_coalesce0(nxt_task_t *task, nxt_sendbuf_t *sb,
                         goto done;
                     }
 
-                    iov[n].iov_base =  b->mem.pos;
+                    iov[n].iov_base = b->mem.pos;
                     iov[n].iov_len = size;
 
                 } else {
@@ -126,7 +126,7 @@ nxt_sendbuf_mem_coalesce(nxt_task_t *task, nxt_sendbuf_coalesce_t *sb)
                         goto done;
                     }
 
-                    sb->iobuf[n].iov_base =  b->mem.pos;
+                    sb->iobuf[n].iov_base = b->mem.pos;
                     sb->iobuf[n].iov_len = size;
 
                 } else {
@@ -376,55 +376,14 @@ nxt_sendbuf_update(nxt_buf_t *b, size_t sent)
 
 
 nxt_buf_t *
-nxt_sendbuf_completion(nxt_task_t *task, nxt_work_queue_t *wq, nxt_buf_t *b,
-    size_t sent, nxt_bool_t mmap_mode)
+nxt_sendbuf_completion(nxt_task_t *task, nxt_work_queue_t *wq, nxt_buf_t *b)
 {
-    size_t  size;
-
     while (b != NULL) {
 
         nxt_prefetch(b->next);
 
-        if (!nxt_buf_is_sync(b)) {
-
-            size = nxt_buf_used_size(b);
-
-            if (size != 0) {
-
-                if (sent == 0) {
-                    break;
-                }
-
-                if (nxt_buf_is_port_mmap(b) && mmap_mode) {
-                    /*
-                     * buffer has been sent to other side which is now
-                     * responsible for shared memory bucket release
-                     */
-                    b->is_port_mmap_sent = 1;
-                }
-
-                if (sent < size) {
-
-                    if (nxt_buf_is_mem(b)) {
-                        b->mem.pos += sent;
-                    }
-
-                    if (nxt_buf_is_file(b)) {
-                        b->file_pos += sent;
-                    }
-
-                    break;
-                }
-
-                /* b->mem.free is NULL in file-only buffer. */
-                b->mem.pos = b->mem.free;
-
-                if (nxt_buf_is_file(b)) {
-                    b->file_pos = b->file_end;
-                }
-
-                sent -= size;
-            }
+        if (!nxt_buf_is_sync(b) && nxt_buf_used_size(b) != 0) {
+            break;
         }
 
         nxt_work_queue_add(wq, b->completion_handler, task, b, b->parent);
@@ -433,4 +392,17 @@ nxt_sendbuf_completion(nxt_task_t *task, nxt_work_queue_t *wq, nxt_buf_t *b,
     }
 
     return b;
+}
+
+
+void
+nxt_sendbuf_drain(nxt_task_t *task, nxt_work_queue_t *wq, nxt_buf_t *b)
+{
+    while (b != NULL) {
+        nxt_prefetch(b->next);
+
+        nxt_work_queue_add(wq, b->completion_handler, task, b, b->parent);
+
+        b = b->next;
+    }
 }

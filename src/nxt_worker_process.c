@@ -21,24 +21,12 @@ static void nxt_worker_process_sigquit_handler(nxt_task_t *task, void *obj,
 
 
 nxt_port_handlers_t  nxt_app_process_port_handlers = {
-    .quit         = nxt_worker_process_quit_handler,
+    .quit         = nxt_app_quit_handler,
     .new_port     = nxt_port_new_port_handler,
     .change_file  = nxt_port_change_log_file_handler,
     .mmap         = nxt_port_mmap_handler,
-    .data         = nxt_port_app_data_handler,
+    .data         = nxt_app_data_handler,
     .remove_pid   = nxt_port_remove_pid_handler,
-};
-
-
-nxt_port_handlers_t  nxt_router_process_port_handlers = {
-    .quit         = nxt_worker_process_quit_handler,
-    .new_port     = nxt_router_new_port_handler,
-    .change_file  = nxt_port_change_log_file_handler,
-    .mmap         = nxt_port_mmap_handler,
-    .data         = nxt_router_conf_data_handler,
-    .remove_pid   = nxt_router_remove_pid_handler,
-    .rpc_ready    = nxt_port_rpc_handler,
-    .rpc_error    = nxt_port_rpc_handler,
 };
 
 
@@ -109,7 +97,7 @@ nxt_worker_process_quit(nxt_task_t *task)
         rt->listen_sockets->nelts = 0;
     }
 
-    nxt_runtime_quit(task);
+    nxt_runtime_quit(task, 0);
 }
 
 
@@ -136,7 +124,7 @@ nxt_worker_process_sigterm_handler(nxt_task_t *task, void *obj, void *data)
 
     /* A fast exit. */
 
-    nxt_runtime_quit(task);
+    nxt_runtime_quit(task, 0);
 }
 
 

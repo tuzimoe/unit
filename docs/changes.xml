@@ -5,6 +5,640 @@
 <change_log title="unit">
 
 
+<changes apply="unit-php
+                unit-python unit-python2.7
+                unit-python3.4 unit-python3.5 unit-python3.6
+                unit-go unit-go1.7 unit-go1.8 unit-go1.9 unit-go1.10
+                unit-perl
+                unit-ruby"
+         ver="1.3" rev="1"
+         date="2018-07-13" time="18:00:00 +0300"
+         packager="Konstantin Pavlov &lt;thresh@nginx.com&gt;">
+
+<change>
+<para>
+NGINX Unit updated to 1.3.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit" ver="1.3" rev="1"
+         date="2018-07-13" time="18:00:00 +0300"
+         packager="Konstantin Pavlov &lt;thresh@nginx.com&gt;">
+
+<change type="change">
+<para>
+UTF-8 characters are now allowed in request header field values.
+</para>
+</change>
+
+<change type="feature">
+<para>
+configuration of the request body size limit.
+</para>
+</change>
+
+<change type="feature">
+<para>
+configuration of various HTTP connection timeouts.
+</para>
+</change>
+
+<change type="feature">
+<para>
+Ruby module now automatically uses Bundler where possible.
+</para>
+</change>
+
+<change type="feature">
+<para>
+http.Flusher interface in Go module.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+various issues in HTTP connection errors handling.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+requests with body data might be handled incorrectly in PHP module.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+individual PHP configuration options specified via control API were reset
+to previous values after the first request in application process.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit-php
+                unit-python unit-python2.7
+                unit-python3.4 unit-python3.5 unit-python3.6
+                unit-go unit-go1.7 unit-go1.8 unit-go1.9 unit-go1.10
+                unit-perl
+                unit-ruby"
+         ver="1.2" rev="1"
+         date="2018-06-07" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change>
+<para>
+NGINX Unit updated to 1.2.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit" ver="1.2" rev="1"
+         date="2018-06-07" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change type="feature">
+<para>
+configuration of environment variables for application processes.
+</para>
+</change>
+
+<change type="feature">
+<para>
+customization of php.ini path.
+</para>
+</change>
+
+<change type="feature">
+<para>
+setting of individual PHP configuration options.
+</para>
+</change>
+
+<change type="feature">
+<para>
+configuration of execution arguments for Go applications.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+keep-alive connections might hang after reconfiguration.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit-go1.10" ver="1.1" rev="1"
+         date="2018-05-14" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change>
+<para>
+Initial release of Go 1.10 module for NGINX Unit.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit-php
+                unit-python unit-python2.7
+                unit-python3.4 unit-python3.5 unit-python3.6
+                unit-go unit-go1.7 unit-go1.8 unit-go1.9
+                unit-perl
+                unit-ruby"
+         ver="1.1" rev="1"
+         date="2018-04-26" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change>
+<para>
+NGINX Unit updated to 1.1.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit" ver="1.1" rev="1"
+         date="2018-04-26" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change type="bugfix">
+<para>
+Python applications that use the write() callable did not work.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+virtual environments created with Python 3.3 or above might not have worked.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+the request.Read() function in Go applications did not produce EOF
+when the whole body was read.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+a segmentation fault might have occurred while access log reopening.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+in parsing of IPv6 control socket addresses.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+loading of application modules was broken on OpenBSD.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+a segmentation fault might have occurred when there were two modules
+with the same type and version; the bug had appeared in 1.0.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+alerts "freed pointer points to non-freeble page" might have appeared in log
+on 32-bit platforms.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit-php
+                unit-python unit-python2.7
+                unit-python3.4 unit-python3.5 unit-python3.6
+                unit-go unit-go1.7 unit-go1.8 unit-go1.9
+                unit-perl
+                unit-ruby"
+         ver="1.0" rev="1"
+         date="2018-04-12" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change>
+<para>
+NGINX Unit updated to 1.0.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit" ver="1.0" rev="1"
+         date="2018-04-12" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change type="change">
+<para>
+configuration object moved into "/config/" path.
+</para>
+</change>
+
+<change type="feature">
+<para>
+basic access logging.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+503 error occurred if Go application did not write response header or body.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+Ruby applications that use encoding conversions might not have worked.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+various stability issues.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit-php
+                unit-python unit-python2.7
+                unit-python3.4 unit-python3.5 unit-python3.6
+                unit-go unit-go1.7 unit-go1.8 unit-go1.9
+                unit-perl"
+         ver="0.7" rev="1"
+         date="2018-03-22" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change>
+<para>
+NGINX Unit updated to 0.7.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit-ruby" ver="0.7" rev="1"
+         date="2018-04-02" time="15:40:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change>
+<para>
+Initial release of Ruby module for NGINX Unit.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit" ver="0.7" rev="1"
+         date="2018-03-22" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change type="feature">
+<para>
+Ruby application module.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+in discovering modules.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+various race conditions on reconfiguration and during shutting down.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+tabs and trailing spaces were not allowed in header fields values.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+a segmentation fault occurred in Python module if start_response() was called
+outside of WSGI callable.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+a segmentation fault might have occurred in PHP module if there was an error
+while initialization.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit-php
+                unit-python unit-python2.7
+                unit-python3.4 unit-python3.5 unit-python3.6
+                unit-go unit-go1.7 unit-go1.8 unit-go1.9
+                unit-perl"
+         ver="0.6" rev="1"
+         date="2018-02-09" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change>
+<para>
+NGINX Unit updated to 0.6.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit" ver="0.6" rev="1"
+         date="2018-02-09" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change type="bugfix">
+<para>
+the main process died when the "type" application option contained version;
+the bug had appeared in 0.5.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit-php
+                unit-python unit-python2.7
+                unit-python3.4 unit-python3.5 unit-python3.6
+                unit-go unit-go1.7 unit-go1.8 unit-go1.9"
+         ver="0.5" rev="1"
+         date="2018-02-08" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change>
+<para>
+NGINX Unit updated to 0.5.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit-perl" ver="0.5" rev="1"
+         date="2018-02-08" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change>
+<para>
+Initial release of Perl module for NGINX Unit.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit" ver="0.5" rev="1"
+         date="2018-02-08" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change type="change">
+<para>
+the "workers" application option was removed, the "processes"
+application option should be used instead.
+</para>
+</change>
+
+<change type="feature">
+<para>
+the "processes" application option with prefork and dynamic
+process management support.
+</para>
+</change>
+
+<change type="feature">
+<para>
+Perl application module.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+in reading client request body; the bug had appeared in 0.3.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+some Python applications might not have worked due to missing
+"wsgi.errors" environ variable.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+HTTP chunked responses might be encoded incorrectly on 32-bit
+platforms.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+infinite looping in HTTP parser.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+segmentation fault in router.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit-php
+                unit-python unit-python2.7
+                unit-python3.4 unit-python3.5 unit-python3.6
+                unit-go unit-go1.7 unit-go1.8 unit-go1.9"
+         ver="0.4" rev="1"
+         date="2018-01-15" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change>
+<para>
+NGINX Unit updated to 0.4.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit" ver="0.4" rev="1"
+         date="2018-01-15" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change type="feature">
+<para>
+compatibility with DragonFly BSD.
+</para>
+</change>
+
+<change type="feature">
+<para>
+"configure php --lib-static" option.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+HTTP request body was not passed to application;
+the bug had appeared in 0.3.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+HTTP large header buffers allocation and deallocation fixed;
+the bug had appeared in 0.3.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+some PHP applications might not have worked with relative "root" path.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit-go1.9" ver="0.3" rev="1"
+         date="2017-12-28" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change>
+<para>
+Initial release of Go 1.9 module for NGINX Unit.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit-python3.6" ver="0.3" rev="1"
+         date="2017-12-28" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change>
+<para>
+Initial release of Python 3.6 module for NGINX Unit.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit-php
+                unit-python unit-python2.7 unit-python3.4 unit-python3.5
+                unit-go unit-go1.7 unit-go1.8"
+         ver="0.3" rev="1"
+         date="2017-12-28" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change>
+<para>
+NGINX Unit updated to 0.3.
+</para>
+</change>
+
+</changes>
+
+
+<changes apply="unit" ver="0.3" rev="1"
+         date="2017-12-28" time="18:00:00 +0300"
+         packager="Andrei Belov &lt;defan@nginx.com&gt;">
+
+<change type="change">
+<para>
+the Go package name changed to "nginx/unit".
+</para>
+</change>
+
+<change type="change">
+<para>
+in the "limits.timeout" application option: application start time and
+time in queue now are not accounted.
+</para>
+</change>
+
+<change type="feature">
+<para>
+the "limits.requests" application option.
+</para>
+</change>
+
+<change type="feature">
+<para>
+application request processing latency optimization.
+</para>
+</change>
+
+<change type="feature">
+<para>
+HTTP keep-alive connections support.
+</para>
+</change>
+
+<change type="feature">
+<para>
+the "home" Python virtual environment configuration option.
+</para>
+</change>
+
+<change type="feature">
+<para>
+Python atexit hook support.
+</para>
+</change>
+
+<change type="feature">
+<para>
+various Go package improvements.
+</para>
+</change>
+
+<change type="bugfix">
+<para>
+various crashes fixed.
+</para>
+</change>
+
+</changes>
+
+
 <changes apply="unit-go" ver="0.2" rev="1"
          date="2017-10-19" time="18:00:00 +0300"
          packager="Andrei Belov &lt;defan@nginx.com&gt;">

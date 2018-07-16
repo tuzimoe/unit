@@ -59,10 +59,12 @@ nxt_buf_mem_ts_alloc(nxt_task_t *task, nxt_mp_t *mp, size_t size)
     nxt_buf_t     *b;
     nxt_buf_ts_t  *ts;
 
-    b = nxt_mp_retain(mp, NXT_BUF_MEM_SIZE + sizeof(nxt_buf_ts_t) + size);
+    b = nxt_mp_alloc(mp, NXT_BUF_MEM_SIZE + sizeof(nxt_buf_ts_t) + size);
     if (nxt_slow_path(b == NULL)) {
         return NULL;
     }
+
+    nxt_mp_retain(mp);
 
     nxt_memzero(b, NXT_BUF_MEM_SIZE + sizeof(nxt_buf_ts_t));
 
@@ -71,8 +73,8 @@ nxt_buf_mem_ts_alloc(nxt_task_t *task, nxt_mp_t *mp, size_t size)
     b->is_ts = 1;
 
     if (size != 0) {
-        b->mem.start = nxt_pointer_to(b, NXT_BUF_MEM_SIZE +
-                                      sizeof(nxt_buf_ts_t));
+        b->mem.start = nxt_pointer_to(b, NXT_BUF_MEM_SIZE
+                                         + sizeof(nxt_buf_ts_t));
         b->mem.pos = b->mem.start;
         b->mem.free = b->mem.start;
         b->mem.end = b->mem.start + size;
@@ -142,7 +144,7 @@ nxt_buf_sync_alloc(nxt_mp_t *mp, nxt_uint_t flags)
 {
     nxt_buf_t  *b;
 
-    b = nxt_mp_zalloc(mp, NXT_BUF_SYNC_SIZE);
+    b = nxt_mp_zalloc(mp, NXT_BUF_MEM_SIZE);
 
     if (nxt_fast_path(b != NULL)) {
         b->data = mp;
@@ -200,13 +202,7 @@ nxt_buf_completion(nxt_task_t *task, void *obj, void *data)
 
     nxt_debug(task, "buf completion: %p %p", b, b->mem.start);
 
-#if (NXT_DEBUG)
-    if (nxt_slow_path(data != b->parent)) {
-        nxt_log_alert(task->log, "completion data (%p) != b->parent (%p)",
-                      data, b->parent);
-        nxt_abort();
-    }
-#endif
+    nxt_assert(data == b->parent);
 
     mp = b->data;
     nxt_mp_free(mp, b);
@@ -233,12 +229,7 @@ nxt_buf_ts_handle(nxt_task_t *task, void *obj, void *data)
 
     b = obj;
 
-#if (NXT_DEBUG)
-    if (nxt_slow_path(b->is_ts == 0)) {
-        nxt_log_alert(task->log, "not a thread safe buf (%p) completed", b);
-        nxt_abort();
-    }
-#endif
+    nxt_assert(b->is_ts != 0);
 
     ts = nxt_pointer_to(b, NXT_BUF_MEM_SIZE);
 
@@ -275,16 +266,11 @@ nxt_buf_ts_completion(nxt_task_t *task, void *obj, void *data)
 
     nxt_debug(task, "buf ts completion: %p %p", b, b->mem.start);
 
-#if (NXT_DEBUG)
-    if (nxt_slow_path(data != b->parent)) {
-        nxt_log_alert(task->log, "completion data (%p) != b->parent (%p)",
-                      data, b->parent);
-        nxt_abort();
-    }
-#endif
+    nxt_assert(data == b->parent);
 
     mp = b->data;
-    nxt_mp_release(mp, b);
+    nxt_mp_free(mp, b);
+    nxt_mp_release(mp);
 
     if (parent != NULL) {
         nxt_debug(task, "parent retain:%uD", parent->retain);
@@ -318,8 +304,9 @@ nxt_buf_make_plain(nxt_mp_t *mp, nxt_buf_t *src, size_t size)
     }
 
     for (i = src; i != NULL; i = i->next) {
-        if (nxt_slow_path(nxt_buf_mem_free_size(&b->mem) <
-                          nxt_buf_used_size(i))) {
+        if (nxt_slow_path(nxt_buf_mem_free_size(&b->mem)
+                          < nxt_buf_used_size(i)))
+        {
             break;
         }
 

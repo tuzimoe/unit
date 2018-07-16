@@ -40,6 +40,9 @@ typedef struct {
 
 static void nxt_controller_process_new_port_handler(nxt_task_t *task,
     nxt_port_recv_msg_t *msg);
+static void nxt_controller_send_current_conf(nxt_task_t *task);
+static void nxt_controller_router_ready_handler(nxt_task_t *task,
+    nxt_port_recv_msg_t *msg);
 static nxt_int_t nxt_controller_conf_default(void);
 static void nxt_controller_conf_init_handler(nxt_task_t *task,
     nxt_port_recv_msg_t *msg, void *data);
@@ -65,7 +68,7 @@ static void nxt_controller_conn_close(nxt_task_t *task, void *obj, void *data);
 static void nxt_controller_conn_free(nxt_task_t *task, void *obj, void *data);
 
 static nxt_int_t nxt_controller_request_content_length(void *ctx,
-    nxt_http_field_t *field, nxt_log_t *log);
+    nxt_http_field_t *field, uintptr_t data);
 
 static void nxt_controller_process_request(nxt_task_t *task,
     nxt_controller_request_t *req);
@@ -79,16 +82,15 @@ static u_char *nxt_controller_date(u_char *buf, nxt_realtime_t *now,
     struct tm *tm, size_t size, const char *format);
 
 
-static nxt_http_fields_hash_entry_t  nxt_controller_request_fields[] = {
+static nxt_http_field_proc_t  nxt_controller_request_fields[] = {
     { nxt_string("Content-Length"),
       &nxt_controller_request_content_length, 0 },
-
-    { nxt_null_string, NULL, 0 }
 };
 
-static nxt_http_fields_hash_t  *nxt_controller_fields_hash;
+static nxt_lvlhsh_t            nxt_controller_fields_hash;
 
 static nxt_uint_t              nxt_controller_listening;
+static nxt_uint_t              nxt_controller_router_ready;
 static nxt_controller_conf_t   nxt_controller_conf;
 static nxt_queue_t             nxt_controller_waiting_requests;
 
@@ -100,28 +102,28 @@ static const nxt_event_conn_state_t  nxt_controller_conn_close_state;
 
 
 nxt_port_handlers_t  nxt_controller_process_port_handlers = {
-    .quit         = nxt_worker_process_quit_handler,
-    .new_port     = nxt_controller_process_new_port_handler,
-    .change_file  = nxt_port_change_log_file_handler,
-    .mmap         = nxt_port_mmap_handler,
-    .data         = nxt_port_data_handler,
-    .remove_pid   = nxt_port_remove_pid_handler,
-    .rpc_ready    = nxt_port_rpc_handler,
-    .rpc_error    = nxt_port_rpc_handler,
+    .quit           = nxt_worker_process_quit_handler,
+    .new_port       = nxt_controller_process_new_port_handler,
+    .change_file    = nxt_port_change_log_file_handler,
+    .mmap           = nxt_port_mmap_handler,
+    .process_ready  = nxt_controller_router_ready_handler,
+    .data           = nxt_port_data_handler,
+    .remove_pid     = nxt_port_remove_pid_handler,
+    .rpc_ready      = nxt_port_rpc_handler,
+    .rpc_error      = nxt_port_rpc_handler,
 };
 
 
 nxt_int_t
 nxt_controller_start(nxt_task_t *task, void *data)
 {
-    nxt_mp_t                *mp;
-    nxt_int_t               ret;
-    nxt_str_t               *json;
-    nxt_runtime_t           *rt;
-    nxt_conf_value_t        *conf;
-    nxt_event_engine_t      *engine;
-    nxt_conf_validation_t   vldt;
-    nxt_http_fields_hash_t  *hash;
+    nxt_mp_t               *mp;
+    nxt_int_t              ret;
+    nxt_str_t              *json;
+    nxt_runtime_t          *rt;
+    nxt_conf_value_t       *conf;
+    nxt_event_engine_t     *engine;
+    nxt_conf_validation_t  vldt;
 
     rt = task->thread->runtime;
 
@@ -132,13 +134,14 @@ nxt_controller_start(nxt_task_t *task, void *data)
         return NXT_ERROR;
     }
 
-    hash = nxt_http_fields_hash_create(nxt_controller_request_fields,
-                                       rt->mem_pool);
-    if (nxt_slow_path(hash == NULL)) {
+    ret = nxt_http_fields_hash(&nxt_controller_fields_hash, rt->mem_pool,
+                               nxt_controller_request_fields,
+                               nxt_nitems(nxt_controller_request_fields));
+
+    if (nxt_slow_path(ret != NXT_OK)) {
         return NXT_ERROR;
     }
 
-    nxt_controller_fields_hash = hash;
     nxt_queue_init(&nxt_controller_waiting_requests);
 
     json = data;
@@ -156,9 +159,8 @@ nxt_controller_start(nxt_task_t *task, void *data)
     nxt_free(json->start);
 
     if (nxt_slow_path(conf == NULL)) {
-        nxt_log(task, NXT_LOG_ALERT,
-                "failed to restore previous configuration: "
-                "file is corrupted or not enough memory");
+        nxt_alert(task, "failed to restore previous configuration: "
+                  "file is corrupted or not enough memory");
 
         nxt_mp_destroy(mp);
         return NXT_OK;
@@ -178,8 +180,8 @@ nxt_controller_start(nxt_task_t *task, void *data)
     if (nxt_slow_path(ret != NXT_OK)) {
 
         if (ret == NXT_DECLINED) {
-            nxt_log(task, NXT_LOG_ALERT,
-                    "the previous configuration is invalid: %V", &vldt.error);
+            nxt_alert(task, "the previous configuration is invalid: %V",
+                      &vldt.error);
 
             nxt_mp_destroy(vldt.pool);
             nxt_mp_destroy(mp);
@@ -205,15 +207,24 @@ static void
 nxt_controller_process_new_port_handler(nxt_task_t *task,
     nxt_port_recv_msg_t *msg)
 {
+    nxt_port_new_port_handler(task, msg);
+
+    if (msg->u.new_port->type != NXT_PROCESS_ROUTER
+        || !nxt_controller_router_ready)
+    {
+        return;
+    }
+
+    nxt_controller_send_current_conf(task);
+}
+
+
+static void
+nxt_controller_send_current_conf(nxt_task_t *task)
+{
     nxt_int_t         rc;
     nxt_runtime_t     *rt;
     nxt_conf_value_t  *conf;
-
-    nxt_port_new_port_handler(task, msg);
-
-    if (msg->u.new_port->type != NXT_PROCESS_ROUTER) {
-        return;
-    }
 
     conf = nxt_controller_conf.root;
 
@@ -243,6 +254,25 @@ nxt_controller_process_new_port_handler(nxt_task_t *task,
     }
 
     nxt_controller_listening = 1;
+}
+
+
+static void
+nxt_controller_router_ready_handler(nxt_task_t *task,
+    nxt_port_recv_msg_t *msg)
+{
+    nxt_port_t     *router_port;
+    nxt_runtime_t  *rt;
+
+    rt = task->thread->runtime;
+
+    router_port = rt->port_by_type[NXT_PROCESS_ROUTER];
+
+    nxt_controller_router_ready = 1;
+
+    if (router_port != NULL) {
+        nxt_controller_send_current_conf(task);
+    }
 }
 
 
@@ -281,7 +311,7 @@ nxt_controller_conf_init_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg,
     nxt_runtime_t  *rt;
 
     if (msg->port_msg.type != NXT_PORT_MSG_RPC_READY) {
-        nxt_log(task, NXT_LOG_ALERT, "failed to apply previous configuration");
+        nxt_alert(task, "failed to apply previous configuration");
 
         nxt_mp_destroy(nxt_controller_conf.pool);
 
@@ -319,7 +349,7 @@ nxt_controller_conf_send(nxt_task_t *task, nxt_conf_value_t *conf,
 
     router_port = rt->port_by_type[NXT_PROCESS_ROUTER];
 
-    if (nxt_slow_path(router_port == NULL)) {
+    if (nxt_slow_path(router_port == NULL || !nxt_controller_router_ready)) {
         return NXT_DECLINED;
     }
 
@@ -337,6 +367,10 @@ nxt_controller_conf_send(nxt_task_t *task, nxt_conf_value_t *conf,
     stream = nxt_port_rpc_register_handler(task, controller_port,
                                            handler, handler,
                                            router_port->pid, data);
+
+    if (nxt_slow_path(stream == 0)) {
+        return NXT_ERROR;
+    }
 
     rc = nxt_port_socket_write(task, router_port, NXT_PORT_MSG_DATA_LAST, -1,
                                stream, controller_port->id, b);
@@ -429,8 +463,6 @@ nxt_controller_conn_init(nxt_task_t *task, void *obj, void *data)
         return;
     }
 
-    r->parser.fields_hash = nxt_controller_fields_hash;
-
     b = nxt_buf_mem_alloc(c->mem_pool, 1024, 0);
     if (nxt_slow_path(b == NULL)) {
         nxt_controller_conn_free(task, c, NULL);
@@ -505,7 +537,8 @@ nxt_controller_conn_read(nxt_task_t *task, void *obj, void *data)
         return;
     }
 
-    rc = nxt_http_fields_process(r->parser.fields, r, task->log);
+    rc = nxt_http_fields_process(r->parser.fields, &nxt_controller_fields_hash,
+                                 r);
 
     if (nxt_slow_path(rc != NXT_OK)) {
         nxt_controller_conn_close(task, c, r);
@@ -721,27 +754,26 @@ nxt_controller_conn_free(nxt_task_t *task, void *obj, void *data)
 
     nxt_sockaddr_cache_free(task->thread->engine, c);
 
-    nxt_mp_destroy(c->mem_pool);
-
-    //nxt_free(c);
+    nxt_conn_free(task, c);
 }
 
 
 static nxt_int_t
 nxt_controller_request_content_length(void *ctx, nxt_http_field_t *field,
-    nxt_log_t *log)
+    uintptr_t data)
 {
     off_t                     length;
     nxt_controller_request_t  *r;
 
     r = ctx;
 
-    length = nxt_off_t_parse(field->value.start, field->value.length);
+    length = nxt_off_t_parse(field->value, field->value_length);
 
-    if (nxt_fast_path(length > 0)) {
+    if (nxt_fast_path(length >= 0)) {
 
         if (nxt_slow_path(length > NXT_SIZE_T_MAX)) {
-            nxt_log_error(NXT_LOG_ERR, log, "Content-Length is too big");
+            nxt_log_error(NXT_LOG_ERR, &r->conn->log,
+                          "Content-Length is too big");
             return NXT_ERROR;
         }
 
@@ -749,7 +781,7 @@ nxt_controller_request_content_length(void *ctx, nxt_http_field_t *field,
         return NXT_OK;
     }
 
-    nxt_log_error(NXT_LOG_ERR, log, "Content-Length is invalid");
+    nxt_log_error(NXT_LOG_ERR, &r->conn->log, "Content-Length is invalid");
 
     return NXT_ERROR;
 }
@@ -773,6 +805,17 @@ nxt_controller_process_request(nxt_task_t *task, nxt_controller_request_t *req)
 
     c = req->conn;
     path = req->parser.path;
+
+    if (nxt_str_start(&path, "/config", 7)) {
+
+        if (path.length == 7) {
+            path.length = 1;
+
+        } else if (path.start[7] == '/') {
+            path.length -= 7;
+            path.start += 7;
+        }
+    }
 
     if (path.length > 1 && path.start[path.length - 1] == '/') {
         path.length--;
@@ -840,6 +883,8 @@ nxt_controller_process_request(nxt_task_t *task, nxt_controller_request_t *req)
                                      &path, value);
 
             if (rc != NXT_OK) {
+                nxt_mp_destroy(mp);
+
                 if (rc == NXT_DECLINED) {
                     goto not_found;
                 }
@@ -1122,7 +1167,7 @@ nxt_controller_response(nxt_task_t *task, nxt_controller_request_t *req,
         (nxt_atomic_uint_t) -1,
         nxt_controller_date,
         "%s, %02d %s %4d %02d:%02d:%02d GMT",
-        sizeof("Wed, 31 Dec 1986 16:40:00 GMT") - 1,
+        nxt_length("Wed, 31 Dec 1986 16:40:00 GMT"),
         NXT_THREAD_TIME_GMT,
         NXT_THREAD_TIME_SEC,
     };
@@ -1219,13 +1264,13 @@ nxt_controller_response(nxt_task_t *task, nxt_controller_request_t *req,
 
     body->mem.free = nxt_cpymem(body->mem.free, "\r\n", 2);
 
-    size = sizeof("HTTP/1.1 " "\r\n") - 1 + status_line.length
-           + sizeof("Server: unit/" NXT_VERSION "\r\n") - 1
-           + sizeof("Date: Wed, 31 Dec 1986 16:40:00 GMT\r\n") - 1
-           + sizeof("Content-Type: application/json\r\n") - 1
-           + sizeof("Content-Length: " "\r\n") - 1 + NXT_SIZE_T_LEN
-           + sizeof("Connection: close\r\n") - 1
-           + sizeof("\r\n") - 1;
+    size = nxt_length("HTTP/1.1 " "\r\n") + status_line.length
+           + nxt_length("Server: " NXT_SERVER "\r\n")
+           + nxt_length("Date: Wed, 31 Dec 1986 16:40:00 GMT\r\n")
+           + nxt_length("Content-Type: application/json\r\n")
+           + nxt_length("Content-Length: " "\r\n") + NXT_SIZE_T_LEN
+           + nxt_length("Connection: close\r\n")
+           + nxt_length("\r\n");
 
     b = nxt_buf_mem_alloc(c->mem_pool, size, 0);
     if (nxt_slow_path(b == NULL)) {
@@ -1242,7 +1287,7 @@ nxt_controller_response(nxt_task_t *task, nxt_controller_request_t *req,
                              status_line.length);
 
     nxt_str_set(&str, "\r\n"
-                      "Server: unit/" NXT_VERSION "\r\n"
+                      "Server: " NXT_SERVER "\r\n"
                       "Date: ");
 
     b->mem.free = nxt_cpymem(b->mem.free, str.start, str.length);

@@ -134,7 +134,7 @@ nxt_event_engine_create(nxt_task_t *task,
     nxt_thread_time_update(thread);
     engine->timers.now = nxt_thread_monotonic_time(thread) / 1000000;
 
-    engine->max_connections = 0xffffffff;
+    engine->max_connections = 0xFFFFFFFF;
 
     nxt_queue_init(&engine->joints);
     nxt_queue_init(&engine->listen_connections);
@@ -349,8 +349,8 @@ nxt_event_engine_signal_pipe_error(nxt_task_t *task, void *obj, void *data)
     engine = task->thread->engine;
     pipe = engine->pipe;
 
-    nxt_log(task, NXT_LOG_CRIT, "engine pipe(%FD:%FD) event error",
-            pipe->fds[0], pipe->fds[1]);
+    nxt_alert(task, "engine pipe(%FD:%FD) event error",
+              pipe->fds[0], pipe->fds[1]);
 
     nxt_fd_event_close(engine, &pipe->event);
     nxt_pipe_close(pipe->event.task, pipe->fds);
@@ -375,7 +375,7 @@ nxt_event_engine_signal_handler(nxt_task_t *task, void *obj, void *data)
         }
     }
 
-    nxt_log(task, NXT_LOG_CRIT, "signal %ui handler not found", signo);
+    nxt_alert(task, "signal %ui handler not found", (nxt_uint_t) signo);
 }
 
 

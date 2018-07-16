@@ -29,6 +29,7 @@ nxt_port_mp_cleanup(nxt_task_t *task, void *obj, void *data)
 
     nxt_assert(port->use_count == 0);
     nxt_assert(port->app_link.next == NULL);
+    nxt_assert(port->idle_link.next == NULL);
 
     nxt_assert(nxt_queue_is_empty(&port->messages));
     nxt_assert(nxt_lvlhsh_is_empty(&port->rpc_streams));
@@ -66,6 +67,7 @@ nxt_port_new(nxt_task_t *task, nxt_port_id_t id, nxt_pid_t pid,
 
         nxt_queue_init(&port->messages);
         nxt_thread_mutex_create(&port->write_mutex);
+        nxt_queue_init(&port->pending_requests);
 
     } else {
         nxt_mp_destroy(mp);
@@ -84,6 +86,8 @@ nxt_port_close(nxt_task_t *task, nxt_port_t *port)
               port->id, port->type);
 
     if (port->pair[0] != -1) {
+        nxt_port_rpc_close(task, port);
+
         nxt_fd_close(port->pair[0]);
         port->pair[0] = -1;
     }
@@ -119,7 +123,7 @@ nxt_port_release(nxt_task_t *task, nxt_port_t *port)
         nxt_process_use(task, port->process, -1);
     }
 
-    nxt_mp_release(port->mem_pool, NULL);
+    nxt_mp_release(port->mem_pool);
 }
 
 
@@ -165,15 +169,15 @@ nxt_port_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
         return;
     }
 
-    nxt_log(task, NXT_LOG_CRIT, "port %d: unknown message type:%uD",
-            msg->port->socket.fd, msg->port_msg.type);
+    nxt_alert(task, "port %d: unknown message type:%uD",
+              msg->port->socket.fd, msg->port_msg.type);
 }
 
 
 void
 nxt_port_quit_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
 {
-    nxt_runtime_quit(task);
+    nxt_runtime_quit(task, 0);
 }
 
 
@@ -302,8 +306,6 @@ nxt_port_process_ready_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
 
     rt = task->thread->runtime;
 
-    nxt_assert(nxt_runtime_is_main(rt));
-
     process = nxt_runtime_process_find(rt, msg->port_msg.pid);
     if (nxt_slow_path(process == NULL)) {
         return;
@@ -311,7 +313,7 @@ nxt_port_process_ready_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
 
     process->ready = 1;
 
-    nxt_assert(nxt_queue_is_empty(&process->ports) == 0);
+    nxt_assert(!nxt_queue_is_empty(&process->ports));
 
     port = nxt_process_port_first(process);
 

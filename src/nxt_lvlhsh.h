@@ -99,6 +99,21 @@ struct nxt_lvlhsh_query_s {
 };
 
 
+typedef struct {
+    const nxt_lvlhsh_proto_t  *proto;
+    /*
+     * Fields to store current bucket entry position.  They cannot be
+     * combined in a single bucket pointer with number of entries in low
+     * bits, because entry positions are not aligned.  A current level is
+     * stored as key bit path from the root.
+     */
+    uint32_t                  *bucket;
+    uint32_t                  current;
+    uint32_t                  entry;
+    uint32_t                  entries;
+} nxt_lvlhsh_each_t;
+
+
 #define                                                                       \
 nxt_lvlhsh_is_empty(lh)                                                       \
     ((lh)->slot == NULL)
@@ -145,24 +160,39 @@ NXT_EXPORT nxt_int_t nxt_lvlhsh_insert(nxt_lvlhsh_t *lh,
 NXT_EXPORT nxt_int_t nxt_lvlhsh_delete(nxt_lvlhsh_t *lh,
     nxt_lvlhsh_query_t *lhq);
 
+/*
+ * nxt_lvlhsh_each_init() initializes iterator.
+ * It must be called before the first nxt_lvlhsh_each() call.
+ */
+#define nxt_lvlhsh_each_init(lhe, _proto)                                     \
+    do {                                                                      \
+        (lhe)->proto = _proto;                                                \
+        (lhe)->bucket = NULL;                                                 \
+    } while (0)
 
-typedef struct {
-    const nxt_lvlhsh_proto_t  *proto;
+/*
+ * nxt_lvlhsh_each() iterates over a lvlhsh.
+ * It returns NULL if there is no more elements.
+ */
+NXT_EXPORT void *nxt_lvlhsh_each(nxt_lvlhsh_t *lh, nxt_lvlhsh_each_t *lhe);
 
-    /*
-     * Fields to store current bucket entry position.  They cannot be
-     * combined in a single bucket pointer with number of entries in low
-     * bits, because entry positions are not aligned.  A current level is
-     * stored as key bit path from the root.
-     */
-    uint32_t                  *bucket;
-    uint32_t                  current;
-    uint32_t                  entry;
-    uint32_t                  entries;
-} nxt_lvlhsh_each_t;
+/*
+ * nxt_lvlhsh_peek() is used to iterate over a lvlhsh during the lvlhsh
+ * destruction.  The returned hash element should be deleted from the lvlhsh,
+ * otherwise it will be returned again by the next nxt_lvlhsh_peek() call.
+ * The function returns NULL if there is no more elements in the lvlhsh.
+ */
+NXT_EXPORT void *nxt_lvlhsh_peek(nxt_lvlhsh_t *lh,
+    const nxt_lvlhsh_proto_t *proto);
 
-
-NXT_EXPORT void *nxt_lvlhsh_each(nxt_lvlhsh_t *lh, nxt_lvlhsh_each_t *le);
+/*
+ * nxt_lvlhsh_retrieve() is used to iterate over a lvlhsh during the lvlhsh
+ * destruction.  As opposed to nxt_lvlhsh_peek() the returned hash element
+ * is deleted from the lvlhsh.  The function returns NULL if there is no
+ * more elements in the lvlhsh.
+ */
+NXT_EXPORT void *nxt_lvlhsh_retrieve(nxt_lvlhsh_t *lh,
+    const nxt_lvlhsh_proto_t *proto, void *pool);
 
 
 NXT_EXPORT void *nxt_lvlhsh_alloc(void *data, size_t size);

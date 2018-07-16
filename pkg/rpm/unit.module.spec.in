@@ -3,12 +3,14 @@
 
 %%MODULE_DEFINITIONS%%
 
-%if 0%{?rhel} == 7
+%if (0%{?rhel} == 7 && 0%{?amzn} == 0)
 %define dist .el7
 %endif
 
 %define unit_version %%UNIT_VERSION%%
 %define unit_release %%UNIT_RELEASE%%%{?dist}.ngx
+
+%define CC_OPT %{optflags}
 
 %define CONFIGURE_ARGS $(echo "%%CONFIGURE_ARGS%%")
 
@@ -50,15 +52,18 @@ tar --strip-components=1 -zxf %{SOURCE0}
 ./configure \
 	%{CONFIGURE_ARGS} \
 	--modules=%{_libdir}/unit/debug-modules \
+	--cc-opt="%{CC_OPT}" \
 	--debug
 ./configure %%MODULE_CONFARGS%%
 make %%MODULE_MAKEARGS%%
 %{__mv} build build-debug
 ./configure \
 	%{CONFIGURE_ARGS} \
-	--modules=%{_libdir}/unit/modules
+	--modules=%{_libdir}/unit/modules \
+	--cc-opt="%{CC_OPT}"
 ./configure %%MODULE_CONFARGS%%
 make %%MODULE_MAKEARGS%%
+%{__mv} build build-nodebug
 
 %install
 %{__rm} -rf %{buildroot}
@@ -66,9 +71,10 @@ make %%MODULE_MAKEARGS%%
 %{__install} -m 644 -p NOTICE \
     %{buildroot}%{_datadir}/doc/%%NAME%%/COPYRIGHT
 %%MODULE_PREINSTALL%%
+%{__ln_s} build-debug build
 DESTDIR=%{buildroot} make %%MODULE_INSTARGS%%
-%{__rm} -rf build
-%{__mv} build-debug build
+%{__rm} -f build
+%{__ln_s} build-nodebug build
 DESTDIR=%{buildroot} make %%MODULE_INSTARGS%%
 
 %check

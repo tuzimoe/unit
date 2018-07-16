@@ -13,7 +13,6 @@ import "C"
 import (
 	"fmt"
 	"net/http"
-	"os"
 )
 
 type response struct {
@@ -43,20 +42,19 @@ func (r *response) Write(p []byte) (n int, err error) {
 	}
 
 	l := C.size_t(len(p))
-	b := getCBytes(p)
+	b := buf_ref(p)
 	res := C.nxt_go_response_write(r.c_req, b, l)
-	C.free(b)
 	return int(res), nil
 }
 
 func (r *response) WriteHeader(code int) {
 	if r.headerSent {
 		// Note: explicitly using Stderr, as Stdout is our HTTP output.
-		fmt.Fprintf(os.Stderr, "CGI attempted to write header twice")
+		nxt_go_warn("multiple response.WriteHeader calls")
 		return
 	}
 	r.headerSent = true
-	fmt.Fprintf(r, "%s %d %s\r\n", r.req.Proto, code, http.StatusText(code))
+	fmt.Fprintf(r, "Status: %d\r\n", code)
 
 	// Set a default Content-Type
 	if _, hasType := r.header["Content-Type"]; !hasType {
@@ -66,4 +64,12 @@ func (r *response) WriteHeader(code int) {
 	r.header.Write(r)
 
 	r.Write([]byte("\r\n"))
+}
+
+func (r *response) Flush() {
+	if !r.headerSent {
+		r.WriteHeader(http.StatusOK)
+	}
+
+	C.nxt_go_response_flush(r.c_req)
 }

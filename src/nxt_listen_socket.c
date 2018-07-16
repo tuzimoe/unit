@@ -20,8 +20,7 @@ nxt_listen_socket(nxt_task_t *task, nxt_socket_t s, int backlog)
         return NXT_OK;
     }
 
-    nxt_log(task, NXT_LOG_CRIT, "listen(%d, %d) failed %E",
-            s, backlog, nxt_socket_errno);
+    nxt_alert(task, "listen(%d, %d) failed %E", s, backlog, nxt_socket_errno);
 
     return NXT_ERROR;
 }
@@ -118,8 +117,8 @@ nxt_listen_socket_create(nxt_task_t *task, nxt_listen_socket_t *ls,
     nxt_debug(task, "listen(%d, %d)", s, ls->backlog);
 
     if (listen(s, ls->backlog) != 0) {
-        nxt_log(task, NXT_LOG_CRIT, "listen(%d, %d) failed %E",
-                s, ls->backlog, nxt_socket_errno);
+        nxt_alert(task, "listen(%d, %d) failed %E",
+                  s, ls->backlog, nxt_socket_errno);
         goto fail;
     }
 
@@ -159,8 +158,8 @@ nxt_listen_socket_update(nxt_task_t *task, nxt_listen_socket_t *ls,
     nxt_debug(task, "listen(%d, %d)", ls->socket, ls->backlog);
 
     if (listen(ls->socket, ls->backlog) != 0) {
-        nxt_log(task, NXT_LOG_CRIT, "listen(%d, %d) failed %E",
-                ls->socket, ls->backlog, nxt_socket_errno);
+        nxt_alert(task, "listen(%d, %d) failed %E",
+                  ls->socket, ls->backlog, nxt_socket_errno);
         goto fail;
     }
 
@@ -201,7 +200,7 @@ nxt_listen_socket_remote_size(nxt_listen_socket_t *ls)
          * comment in nxt_socket.h.
          */
         ls->socklen = offsetof(struct sockaddr_un, sun_path) + 1;
-        ls->address_length = sizeof("unix:") - 1;
+        ls->address_length = nxt_length("unix:");
 
         break;
 
@@ -240,7 +239,7 @@ nxt_listen_socket_pool_min_size(nxt_listen_socket_t *ls)
         ls->address_length = NXT_INET6_ADDR_STR_LEN;
 
         size = offsetof(nxt_sockaddr_t, u) + sizeof(struct sockaddr_in6)
-               + NXT_INET6_ADDR_STR_LEN + (sizeof(":65535") - 1);
+               + NXT_INET6_ADDR_STR_LEN + nxt_length(":65535");
 
         if (IN6_IS_ADDR_UNSPECIFIED(&ls->sockaddr->u.sockaddr_in6.sin6_addr)) {
             size += offsetof(nxt_sockaddr_t, u) + sizeof(struct sockaddr_in6);
@@ -260,8 +259,8 @@ nxt_listen_socket_pool_min_size(nxt_listen_socket_t *ls)
          * sizeof(struct sockaddr_un), see comment in nxt_socket.h.
          */
         ls->socklen = 3;
-        size = ls->socklen + sizeof("unix:") - 1;
-        ls->address_length = sizeof("unix:") - 1;
+        size = ls->socklen + nxt_length("unix:");
+        ls->address_length = nxt_length("unix:");
 
         break;
 
@@ -272,7 +271,7 @@ nxt_listen_socket_pool_min_size(nxt_listen_socket_t *ls)
         ls->address_length = NXT_INET_ADDR_STR_LEN;
 
         size = offsetof(nxt_sockaddr_t, u) + sizeof(struct sockaddr_in)
-               + NXT_INET_ADDR_STR_LEN + (sizeof(":65535") - 1);
+               + NXT_INET_ADDR_STR_LEN + nxt_length(":65535");
 
         if (ls->sockaddr->u.sockaddr_in.sin_addr.s_addr == INADDR_ANY) {
             size += offsetof(nxt_sockaddr_t, u) + sizeof(struct sockaddr_in);
@@ -305,5 +304,5 @@ nxt_listen_socket_log_handler(void *ctx, u_char *pos, u_char *end)
     sa = ctx;
 
     return nxt_sprintf(pos, end, " while creating listening socket on %*s",
-                       sa->length, sa->start);
+                       (size_t) sa->length, nxt_sockaddr_start(sa));
 }

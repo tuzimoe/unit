@@ -71,16 +71,16 @@ nxt_log_time_handler(nxt_uint_t level, nxt_log_t *log, const char *fmt, ...)
         p = log->ctx_handler(log->ctx, p, end);
     }
 
-    if (p > end - NXT_LINEFEED_SIZE) {
-        p = end - NXT_LINEFEED_SIZE;
+    if (p > end - nxt_length("\n")) {
+        p = end - nxt_length("\n");
     }
 
-    nxt_linefeed(p);
+    *p++ = '\n';
 
     (void) nxt_write_console(nxt_stderr, msg, p - msg);
 
-    if (level <= NXT_LOG_ALERT) {
-        *(p - NXT_LINEFEED_SIZE) = '\0';
+    if (level == NXT_LOG_ALERT) {
+        *(p - nxt_length("\n")) = '\0';
 
         /*
          * The syslog LOG_ALERT level is enough, because
@@ -95,7 +95,7 @@ static nxt_time_string_t  nxt_log_error_time_cache = {
     (nxt_atomic_uint_t) -1,
     nxt_log_error_time,
     "%4d/%02d/%02d %02d:%02d:%02d ",
-    sizeof("1970/09/28 12:00:00 ") - 1,
+    nxt_length("1970/09/28 12:00:00 "),
     NXT_THREAD_TIME_LOCAL,
     NXT_THREAD_TIME_MSEC,
 };
@@ -115,7 +115,7 @@ static nxt_time_string_t  nxt_log_debug_time_cache = {
     (nxt_atomic_uint_t) -1,
     nxt_log_debug_time,
     "%4d/%02d/%02d %02d:%02d:%02d.%03d ",
-    sizeof("1970/09/28 12:00:00.000 ") - 1,
+    nxt_length("1970/09/28 12:00:00.000 "),
     NXT_THREAD_TIME_LOCAL,
     NXT_THREAD_TIME_MSEC,
 };

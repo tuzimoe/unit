@@ -4,16 +4,14 @@
  * Copyright (C) NGINX, Inc.
  */
 
-#ifndef NXT_CONFIGURE
-
-
 #include "nxt_go_port.h"
 #include "nxt_go_log.h"
 #include "nxt_go_process.h"
 #include "nxt_go_run_ctx.h"
 
+#include "_cgo_export.h"
+
 #include <nxt_main.h>
-#include <nxt_go_gen.h>
 
 
 #define nxt_go_str(p) ((nxt_go_str_t *)(p))
@@ -29,16 +27,23 @@ nxt_go_data_handler(nxt_port_msg_t *port_msg, size_t size)
     nxt_go_request_t          r;
     nxt_app_request_header_t  *h;
 
-    r = nxt_go_find_request(port_msg->stream);
-    if (r != 0) {
-        return r;
+    ctx = malloc(sizeof(nxt_go_run_ctx_t) + size);
+
+    memcpy(ctx->port_msg, port_msg, size);
+    port_msg = ctx->port_msg;
+
+    size -= sizeof(nxt_port_msg_t);
+
+    nxt_go_ctx_init(ctx, port_msg, size);
+
+    if (nxt_slow_path(ctx->cancelled)) {
+        nxt_go_debug("request already cancelled by router");
+        free(ctx);
+        return 0;
     }
 
-    ctx = malloc(sizeof(nxt_go_run_ctx_t));
-    nxt_go_ctx_init(ctx, port_msg, size - sizeof(nxt_port_msg_t));
-
     r = (nxt_go_request_t)(ctx);
-    h = &ctx->r.header;
+    h = &ctx->request.header;
 
     nxt_go_ctx_read_str(ctx, &h->method);
     nxt_go_ctx_read_str(ctx, &h->target);
@@ -60,18 +65,20 @@ nxt_go_data_handler(nxt_port_msg_t *port_msg, size_t size)
         h->path = h->target;
     }
 
-    nxt_go_new_request(r, port_msg->stream, nxt_go_str(&h->method),
-                       nxt_go_str(&h->target));
+    ctx->go_request = nxt_go_new_request(r, port_msg->stream,
+                                   nxt_go_str(&h->method),
+                                   nxt_go_str(&h->target));
 
     nxt_go_ctx_read_str(ctx, &h->version);
 
-    nxt_go_request_set_proto(r, nxt_go_str(&h->version),
+    nxt_go_request_set_proto(ctx->go_request, nxt_go_str(&h->version),
                              h->version.start[5] - '0',
                              h->version.start[7] - '0');
 
-    nxt_go_ctx_read_str(ctx, &ctx->r.remote);
-    if (ctx->r.remote.start != NULL) {
-        nxt_go_request_set_remote_addr(r, nxt_go_str(&ctx->r.remote));
+    nxt_go_ctx_read_str(ctx, &ctx->request.remote);
+    if (ctx->request.remote.start != NULL) {
+        nxt_go_request_set_remote_addr(ctx->go_request,
+                                       nxt_go_str(&ctx->request.remote));
     }
 
     nxt_go_ctx_read_str(ctx, &h->host);
@@ -80,7 +87,7 @@ nxt_go_data_handler(nxt_port_msg_t *port_msg, size_t size)
     nxt_go_ctx_read_str(ctx, &h->content_length);
 
     if (h->host.start != NULL) {
-        nxt_go_request_set_host(r, nxt_go_str(&h->host));
+        nxt_go_request_set_host(ctx->go_request, nxt_go_str(&h->host));
     }
 
     nxt_go_ctx_read_size(ctx, &s);
@@ -94,21 +101,23 @@ nxt_go_data_handler(nxt_port_msg_t *port_msg, size_t size)
         }
 
         rc = nxt_go_ctx_read_str(ctx, &v);
-        nxt_go_request_add_header(r, nxt_go_str(&n), nxt_go_str(&v));
+        nxt_go_request_add_header(ctx->go_request, nxt_go_str(&n),
+                                  nxt_go_str(&v));
     } while(1);
 
     nxt_go_ctx_read_size(ctx, &s);
-    ctx->r.body.preread_size = s;
+    ctx->request.body.preread_size = s;
 
     if (h->parsed_content_length > 0) {
-        nxt_go_request_set_content_length(r, h->parsed_content_length);
+        nxt_go_request_set_content_length(ctx->go_request,
+                                          h->parsed_content_length);
     }
 
-    if (ctx->r.body.preread_size < h->parsed_content_length) {
-        nxt_go_request_create_channel(r);
+    if (ctx->request.body.preread_size < h->parsed_content_length) {
+        nxt_go_warn("preread_size < content_length");
     }
 
-    return r;
+    return ctx->go_request;
 }
 
 nxt_go_request_t
@@ -205,6 +214,3 @@ fail:
 
     return 0;
 }
-
-
-#endif /* NXT_CONFIGURE */

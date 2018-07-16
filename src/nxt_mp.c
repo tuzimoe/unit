@@ -89,6 +89,7 @@ typedef enum {
 typedef struct {
     NXT_RBTREE_NODE      (node);
     nxt_mp_block_type_t  type:8;
+    uint8_t              freeable;
 
     /* Block size must be less than 4G. */
     uint32_t             size;
@@ -150,7 +151,8 @@ static void *nxt_mp_get_small(nxt_mp_t *mp, nxt_queue_t *pages, size_t size);
 static nxt_mp_page_t *nxt_mp_alloc_page(nxt_mp_t *mp);
 static nxt_mp_block_t *nxt_mp_alloc_cluster(nxt_mp_t *mp);
 #endif
-static void *nxt_mp_alloc_large(nxt_mp_t *mp, size_t alignment, size_t size);
+static void *nxt_mp_alloc_large(nxt_mp_t *mp, size_t alignment, size_t size,
+    nxt_bool_t freeable);
 static intptr_t nxt_mp_rbtree_compare(nxt_rbtree_node_t *node1,
     nxt_rbtree_node_t *node2);
 static nxt_mp_block_t *nxt_mp_find_block(nxt_rbtree_t *tree, u_char *p);
@@ -282,6 +284,28 @@ nxt_mp_create(size_t cluster_size, size_t page_alignment, size_t page_size,
 
 
 void
+nxt_mp_retain(nxt_mp_t *mp)
+{
+    mp->retain++;
+
+    nxt_thread_log_debug("mp %p retain: %uD", mp, mp->retain);
+}
+
+
+void
+nxt_mp_release(nxt_mp_t *mp)
+{
+    mp->retain--;
+
+    nxt_thread_log_debug("mp %p release: %uD", mp, mp->retain);
+
+    if (mp->retain == 0) {
+        nxt_mp_destroy(mp);
+    }
+}
+
+
+void
 nxt_mp_destroy(nxt_mp_t *mp)
 {
     void               *p;
@@ -373,12 +397,12 @@ nxt_mp_alloc(nxt_mp_t *mp, size_t size)
         p = nxt_mp_alloc_small(mp, size);
 
     } else {
-        p = nxt_mp_alloc_large(mp, NXT_MAX_ALIGNMENT, size);
+        p = nxt_mp_alloc_large(mp, NXT_MAX_ALIGNMENT, size, 1);
     }
 
 #else
 
-    p = nxt_mp_alloc_large(mp, NXT_MAX_ALIGNMENT, size);
+    p = nxt_mp_alloc_large(mp, NXT_MAX_ALIGNMENT, size, 1);
 
 #endif
 
@@ -422,12 +446,12 @@ nxt_mp_align(nxt_mp_t *mp, size_t alignment, size_t size)
             p = nxt_mp_alloc_small(mp, aligned_size);
 
         } else {
-            p = nxt_mp_alloc_large(mp, alignment, size);
+            p = nxt_mp_alloc_large(mp, alignment, size, 1);
         }
 
 #else
 
-        p = nxt_mp_alloc_large(mp, alignment, size);
+        p = nxt_mp_alloc_large(mp, alignment, size, 1);
 
 #endif
 
@@ -684,7 +708,8 @@ nxt_mp_alloc_cluster(nxt_mp_t *mp)
 
 
 static void *
-nxt_mp_alloc_large(nxt_mp_t *mp, size_t alignment, size_t size)
+nxt_mp_alloc_large(nxt_mp_t *mp, size_t alignment, size_t size,
+    nxt_bool_t freeable)
 {
     u_char          *p;
     size_t          aligned_size;
@@ -725,6 +750,7 @@ nxt_mp_alloc_large(nxt_mp_t *mp, size_t alignment, size_t size)
     }
 
     block->type = type;
+    block->freeable = freeable;
     block->size = size;
     block->start = p;
 
@@ -750,7 +776,6 @@ void
 nxt_mp_free(nxt_mp_t *mp, void *p)
 {
     const char      *err;
-    nxt_thread_t    *thread;
     nxt_mp_block_t  *block;
 
     nxt_mp_thread_assert(mp);
@@ -769,15 +794,20 @@ nxt_mp_free(nxt_mp_t *mp, void *p)
             }
 
         } else if (nxt_fast_path(p == block->start)) {
-            nxt_rbtree_delete(&mp->blocks, &block->node);
 
-            if (block->type == NXT_MP_DISCRETE_BLOCK) {
-                nxt_free(block);
+            if (block->freeable) {
+                nxt_rbtree_delete(&mp->blocks, &block->node);
+
+                if (block->type == NXT_MP_DISCRETE_BLOCK) {
+                    nxt_free(block);
+                }
+
+                nxt_free(p);
+
+                return;
             }
 
-            nxt_free(p);
-
-            return;
+            err = "freed pointer points to non-freeable block: %p";
 
         } else {
             err = "freed pointer points to middle of block: %p";
@@ -787,9 +817,7 @@ nxt_mp_free(nxt_mp_t *mp, void *p)
         err = "freed pointer is out of pool: %p";
     }
 
-    thread = nxt_thread();
-
-    nxt_log(thread->task, NXT_LOG_CRIT, err, p);
+    nxt_thread_log_alert(err, p);
 }
 
 
@@ -840,7 +868,7 @@ nxt_mp_chunk_free(nxt_mp_t *mp, nxt_mp_block_t *cluster, u_char *p)
     }
 
     if (nxt_slow_path(page->size == 0xFF)) {
-        return "freed pointer points to non-freeble page: %p";
+        return "freed pointer points to non-freeable page: %p";
     }
 
     size = page->size << mp->chunk_size_shift;
@@ -934,43 +962,6 @@ nxt_mp_chunk_free(nxt_mp_t *mp, nxt_mp_block_t *cluster, u_char *p)
 
 
 void *
-nxt_mp_retain(nxt_mp_t *mp, size_t size)
-{
-    void  *p;
-
-    p = nxt_mp_alloc(mp, size);
-
-    if (nxt_fast_path(p != NULL)) {
-        mp->retain++;
-        nxt_debug_alloc("mp %p retain: %uD", mp, mp->retain);
-    }
-
-    return p;
-}
-
-
-uint32_t
-nxt_mp_release(nxt_mp_t *mp, void *p)
-{
-    if (nxt_fast_path(p != NULL)) {
-        nxt_mp_free(mp, p);
-    }
-
-    mp->retain--;
-
-    nxt_debug_alloc("mp %p release: %uD", mp, mp->retain);
-
-    if (mp->retain == 0) {
-        nxt_mp_destroy(mp);
-
-        return 0;
-    }
-
-    return mp->retain;
-}
-
-
-void *
 nxt_mp_nget(nxt_mp_t *mp, size_t size)
 {
     void  *p;
@@ -981,12 +972,12 @@ nxt_mp_nget(nxt_mp_t *mp, size_t size)
         p = nxt_mp_get_small(mp, &mp->nget_pages, size);
 
     } else {
-        p = nxt_mp_alloc_large(mp, NXT_MAX_ALIGNMENT, size);
+        p = nxt_mp_alloc_large(mp, NXT_MAX_ALIGNMENT, size, 0);
     }
 
 #else
 
-    p = nxt_mp_alloc_large(mp, NXT_MAX_ALIGNMENT, size);
+    p = nxt_mp_alloc_large(mp, NXT_MAX_ALIGNMENT, size, 0);
 
 #endif
 
@@ -1008,12 +999,12 @@ nxt_mp_get(nxt_mp_t *mp, size_t size)
         p = nxt_mp_get_small(mp, &mp->get_pages, size);
 
     } else {
-        p = nxt_mp_alloc_large(mp, NXT_MAX_ALIGNMENT, size);
+        p = nxt_mp_alloc_large(mp, NXT_MAX_ALIGNMENT, size, 0);
     }
 
 #else
 
-    p = nxt_mp_alloc_large(mp, NXT_MAX_ALIGNMENT, size);
+    p = nxt_mp_alloc_large(mp, NXT_MAX_ALIGNMENT, size, 0);
 
 #endif
 

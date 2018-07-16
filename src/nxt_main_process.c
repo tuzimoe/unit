@@ -9,7 +9,7 @@
 #include <nxt_port.h>
 #include <nxt_main_process.h>
 #include <nxt_conf.h>
-#include <nxt_application.h>
+#include <nxt_router.h>
 
 
 typedef struct {
@@ -18,6 +18,12 @@ typedef struct {
     u_char              *start;
     u_char              *end;
 } nxt_listening_socket_t;
+
+
+typedef struct {
+    nxt_uint_t          size;
+    nxt_conf_map_t      *map;
+} nxt_conf_app_map_t;
 
 
 static nxt_int_t nxt_main_process_port_create(nxt_task_t *task,
@@ -53,6 +59,8 @@ static void nxt_main_port_modules_handler(nxt_task_t *task,
 static int nxt_cdecl nxt_app_lang_compare(const void *v1, const void *v2);
 static void nxt_main_port_conf_store_handler(nxt_task_t *task,
     nxt_port_recv_msg_t *msg);
+static void nxt_main_port_access_log_handler(nxt_task_t *task,
+    nxt_port_recv_msg_t *msg);
 
 
 const nxt_sig_event_t  nxt_main_process_signals[] = {
@@ -72,7 +80,7 @@ nxt_int_t
 nxt_main_process_start(nxt_thread_t *thr, nxt_task_t *task,
     nxt_runtime_t *rt)
 {
-    rt->types |= (1U << NXT_PROCESS_MAIN);
+    rt->type = NXT_PROCESS_MAIN;
 
     if (nxt_main_process_port_create(task, rt) != NXT_OK) {
         return NXT_ERROR;
@@ -115,9 +123,18 @@ static nxt_conf_map_t  nxt_common_app_conf[] = {
     },
 
     {
-        nxt_string("workers"),
-        NXT_CONF_MAP_INT32,
-        offsetof(nxt_common_app_conf_t, workers),
+        nxt_string("environment"),
+        NXT_CONF_MAP_PTR,
+        offsetof(nxt_common_app_conf_t, environment),
+    },
+};
+
+
+static nxt_conf_map_t  nxt_python_app_conf[] = {
+    {
+        nxt_string("home"),
+        NXT_CONF_MAP_CSTRZ,
+        offsetof(nxt_common_app_conf_t, u.python.home),
     },
 
     {
@@ -131,10 +148,13 @@ static nxt_conf_map_t  nxt_common_app_conf[] = {
         NXT_CONF_MAP_STR,
         offsetof(nxt_common_app_conf_t, u.python.module),
     },
+};
 
+
+static nxt_conf_map_t  nxt_php_app_conf[] = {
     {
         nxt_string("root"),
-        NXT_CONF_MAP_STR,
+        NXT_CONF_MAP_CSTRZ,
         offsetof(nxt_common_app_conf_t, u.php.root),
     },
 
@@ -151,10 +171,53 @@ static nxt_conf_map_t  nxt_common_app_conf[] = {
     },
 
     {
+        nxt_string("options"),
+        NXT_CONF_MAP_PTR,
+        offsetof(nxt_common_app_conf_t, u.php.options),
+    },
+};
+
+
+static nxt_conf_map_t  nxt_go_app_conf[] = {
+    {
         nxt_string("executable"),
         NXT_CONF_MAP_CSTRZ,
         offsetof(nxt_common_app_conf_t, u.go.executable),
     },
+
+    {
+        nxt_string("arguments"),
+        NXT_CONF_MAP_PTR,
+        offsetof(nxt_common_app_conf_t, u.go.arguments),
+    },
+
+};
+
+
+static nxt_conf_map_t  nxt_perl_app_conf[] = {
+    {
+        nxt_string("script"),
+        NXT_CONF_MAP_CSTRZ,
+        offsetof(nxt_common_app_conf_t, u.perl.script),
+    },
+};
+
+
+static nxt_conf_map_t  nxt_ruby_app_conf[] = {
+    {
+        nxt_string("script"),
+        NXT_CONF_MAP_STR,
+        offsetof(nxt_common_app_conf_t, u.ruby.script),
+    },
+};
+
+
+static nxt_conf_app_map_t  nxt_app_maps[] = {
+    { nxt_nitems(nxt_python_app_conf), nxt_python_app_conf },
+    { nxt_nitems(nxt_php_app_conf),    nxt_php_app_conf },
+    { nxt_nitems(nxt_go_app_conf),     nxt_go_app_conf },
+    { nxt_nitems(nxt_perl_app_conf),   nxt_perl_app_conf },
+    { nxt_nitems(nxt_ruby_app_conf),   nxt_ruby_app_conf },
 };
 
 
@@ -169,11 +232,13 @@ nxt_port_main_data_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
 static void
 nxt_port_main_start_worker_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
 {
-    u_char                 *start;
+    u_char                 *start, ch;
+    size_t                 type_len;
     nxt_mp_t               *mp;
     nxt_int_t              ret;
     nxt_buf_t              *b;
     nxt_port_t             *port;
+    nxt_app_type_t         idx;
     nxt_conf_value_t       *conf;
     nxt_common_app_conf_t  app_conf;
 
@@ -208,7 +273,7 @@ nxt_port_main_start_worker_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
     conf = nxt_conf_json_parse(mp, start, b->mem.free, NULL);
 
     if (conf == NULL) {
-        nxt_log(task, NXT_LOG_CRIT, "configuration parsing error");
+        nxt_alert(task, "router app configuration parsing error");
 
         goto failed;
     }
@@ -218,8 +283,30 @@ nxt_port_main_start_worker_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
     ret = nxt_conf_map_object(mp, conf, nxt_common_app_conf,
                               nxt_nitems(nxt_common_app_conf), &app_conf);
     if (ret != NXT_OK) {
-        nxt_log(task, NXT_LOG_CRIT, "root map error");
+        nxt_alert(task, "failed to map common app conf received from router");
+        goto failed;
+    }
 
+    for (type_len = 0; type_len != app_conf.type.length; type_len++) {
+        ch = app_conf.type.start[type_len];
+
+        if (ch == ' ' || nxt_isdigit(ch)) {
+            break;
+        }
+    }
+
+    idx = nxt_app_parse_type(app_conf.type.start, type_len);
+
+    if (nxt_slow_path(idx >= nxt_nitems(nxt_app_maps))) {
+        nxt_alert(task, "invalid app type %d received from router", (int) idx);
+        goto failed;
+    }
+
+    ret = nxt_conf_map_object(mp, conf, nxt_app_maps[idx].map,
+                              nxt_app_maps[idx].size, &app_conf);
+
+    if (nxt_slow_path(ret != NXT_OK)) {
+        nxt_alert(task, "failed to map app conf received from router");
         goto failed;
     }
 
@@ -248,6 +335,7 @@ static nxt_port_handlers_t  nxt_main_process_port_handlers = {
     .socket         = nxt_main_port_socket_handler,
     .modules        = nxt_main_port_modules_handler,
     .conf_store     = nxt_main_port_conf_store_handler,
+    .access_log     = nxt_main_port_access_log_handler,
     .rpc_ready      = nxt_port_rpc_handler,
     .rpc_error      = nxt_port_rpc_handler,
 };
@@ -306,7 +394,8 @@ nxt_main_process_title(nxt_task_t *task)
 
     end = title + sizeof(title) - 1;
 
-    p = nxt_sprintf(title, end, "unit: main [%s", nxt_process_argv[0]);
+    p = nxt_sprintf(title, end, "unit: main v" NXT_VERSION " [%s",
+                    nxt_process_argv[0]);
 
     for (i = 1; nxt_process_argv[i] != NULL; i++) {
         p = nxt_sprintf(p, end, " %s", nxt_process_argv[i]);
@@ -381,9 +470,8 @@ nxt_main_create_controller_process(nxt_task_t *task, nxt_runtime_t *rt,
                 conf.length = 0;
                 nxt_free(conf.start);
 
-                nxt_log(task, NXT_LOG_ALERT,
-                        "failed to restore previous configuration: "
-                        "cannot read the file");
+                nxt_alert(task, "failed to restore previous configuration: "
+                          "cannot read the file");
             }
         }
 
@@ -606,7 +694,7 @@ nxt_main_process_sigterm_handler(nxt_task_t *task, void *obj, void *data)
 
     nxt_exiting = 1;
 
-    nxt_runtime_quit(task);
+    nxt_runtime_quit(task, 0);
 }
 
 
@@ -620,7 +708,7 @@ nxt_main_process_sigquit_handler(nxt_task_t *task, void *obj, void *data)
 
     nxt_exiting = 1;
 
-    nxt_runtime_quit(task);
+    nxt_runtime_quit(task, 0);
 }
 
 
@@ -630,19 +718,27 @@ nxt_main_process_sigusr1_handler(nxt_task_t *task, void *obj, void *data)
     nxt_mp_t        *mp;
     nxt_int_t       ret;
     nxt_uint_t      n;
+    nxt_port_t      *port;
     nxt_file_t      *file, *new_file;
-    nxt_runtime_t   *rt;
     nxt_array_t     *new_files;
+    nxt_runtime_t   *rt;
 
     nxt_log(task, NXT_LOG_NOTICE, "signal %d (%s) recevied, %s",
             (int) (uintptr_t) obj, data, "log files rotation");
+
+    rt = task->thread->runtime;
+
+    port = rt->port_by_type[NXT_PROCESS_ROUTER];
+
+    if (nxt_fast_path(port != NULL)) {
+        (void) nxt_port_socket_write(task, port, NXT_PORT_MSG_ACCESS_LOG,
+                                     -1, 0, 0, NULL);
+    }
 
     mp = nxt_mp_create(1024, 128, 256, 32);
     if (mp == NULL) {
         return;
     }
-
-    rt = task->thread->runtime;
 
     n = nxt_list_nelts(rt->log_files);
 
@@ -659,7 +755,7 @@ nxt_main_process_sigusr1_handler(nxt_task_t *task, void *obj, void *data)
 
         new_file->name = file->name;
         new_file->fd = NXT_FILE_INVALID;
-        new_file->log_level = NXT_LOG_CRIT;
+        new_file->log_level = NXT_LOG_ALERT;
 
         ret = nxt_file_open(task, new_file, O_WRONLY | O_APPEND, O_CREAT,
                             NXT_FILE_OWNER_ACCESS);
@@ -738,7 +834,7 @@ nxt_main_process_sigchld_handler(nxt_task_t *task, void *obj, void *data)
                 continue;
 
             default:
-                nxt_log(task, NXT_LOG_CRIT, "waitpid() failed: %E", err);
+                nxt_alert(task, "waitpid() failed: %E", err);
                 return;
             }
         }
@@ -751,12 +847,12 @@ nxt_main_process_sigchld_handler(nxt_task_t *task, void *obj, void *data)
 
         if (WTERMSIG(status)) {
 #ifdef WCOREDUMP
-            nxt_log(task, NXT_LOG_CRIT, "process %PI exited on signal %d%s",
-                    pid, WTERMSIG(status),
-                    WCOREDUMP(status) ? " (core dumped)" : "");
+            nxt_alert(task, "process %PI exited on signal %d%s",
+                      pid, WTERMSIG(status),
+                      WCOREDUMP(status) ? " (core dumped)" : "");
 #else
-            nxt_log(task, NXT_LOG_CRIT, "process %PI exited on signal %d",
-                    pid, WTERMSIG(status));
+            nxt_alert(task, "process %PI exited on signal %d",
+                      pid, WTERMSIG(status));
 #endif
 
         } else {
@@ -808,8 +904,9 @@ nxt_main_cleanup_worker_process(nxt_task_t *task, nxt_pid_t pid)
 
                 buf = nxt_buf_mem_ts_alloc(task, task->thread->engine->mem_pool,
                                            sizeof(pid));
-
-                nxt_assert(buf != NULL);
+                if (nxt_slow_path(buf == NULL)) {
+                    continue;
+                }
 
                 buf->mem.free = nxt_cpymem(buf->mem.free, &pid, sizeof(pid));
 
@@ -821,7 +918,7 @@ nxt_main_cleanup_worker_process(nxt_task_t *task, nxt_pid_t pid)
         if (nxt_exiting) {
 
             if (rt->nprocesses == 2) {
-                nxt_runtime_quit(task);
+                nxt_runtime_quit(task, 0);
             }
 
         } else if (init != NULL) {
@@ -864,20 +961,20 @@ nxt_main_port_socket_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
                                  msg->port_msg.reply_port);
 
     nxt_debug(task, "listening socket \"%*s\"",
-              sa->length, nxt_sockaddr_start(sa));
+              (size_t) sa->length, nxt_sockaddr_start(sa));
 
     ret = nxt_main_listening_socket(sa, &ls);
 
     if (ret == NXT_OK) {
         nxt_debug(task, "socket(\"%*s\"): %d",
-                  sa->length, nxt_sockaddr_start(sa), ls.socket);
+                  (size_t) sa->length, nxt_sockaddr_start(sa), ls.socket);
 
         type = NXT_PORT_MSG_RPC_READY_LAST | NXT_PORT_MSG_CLOSE_FD;
 
     } else {
         size = ls.end - ls.start;
 
-        nxt_log(task, NXT_LOG_CRIT, "%*s", size, ls.start);
+        nxt_alert(task, "%*s", size, ls.start);
 
         out = nxt_buf_mem_ts_alloc(task, task->thread->engine->mem_pool,
                                    size + 1);
@@ -921,7 +1018,7 @@ nxt_main_listening_socket(nxt_sockaddr_t *sa, nxt_listening_socket_t *ls)
 
         ls->end = nxt_sprintf(ls->start, ls->end,
                               "socket(\\\"%*s\\\") failed %E",
-                              sa->length, nxt_sockaddr_start(sa), err);
+                              (size_t) sa->length, nxt_sockaddr_start(sa), err);
 
         return NXT_ERROR;
     }
@@ -929,7 +1026,8 @@ nxt_main_listening_socket(nxt_sockaddr_t *sa, nxt_listening_socket_t *ls)
     if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &enable, length) != 0) {
         ls->end = nxt_sprintf(ls->start, ls->end,
                               "setsockopt(\\\"%*s\\\", SO_REUSEADDR) failed %E",
-                              sa->length, nxt_sockaddr_start(sa), nxt_errno);
+                              (size_t) sa->length, nxt_sockaddr_start(sa),
+                              nxt_errno);
         goto fail;
     }
 
@@ -940,7 +1038,8 @@ nxt_main_listening_socket(nxt_sockaddr_t *sa, nxt_listening_socket_t *ls)
         if (setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &enable, length) != 0) {
             ls->end = nxt_sprintf(ls->start, ls->end,
                                "setsockopt(\\\"%*s\\\", IPV6_V6ONLY) failed %E",
-                               sa->length, nxt_sockaddr_start(sa), nxt_errno);
+                               (size_t) sa->length, nxt_sockaddr_start(sa),
+                               nxt_errno);
             goto fail;
         }
     }
@@ -986,7 +1085,7 @@ nxt_main_listening_socket(nxt_sockaddr_t *sa, nxt_listening_socket_t *ls)
         }
 
         ls->end = nxt_sprintf(ls->start, ls->end, "bind(\\\"%*s\\\") failed %E",
-                              sa->length, nxt_sockaddr_start(sa), err);
+                              (size_t) sa->length, nxt_sockaddr_start(sa), err);
         goto fail;
     }
 
@@ -1003,7 +1102,7 @@ next:
 
         if (chmod(filename, access) != 0) {
             ls->end = nxt_sprintf(ls->start, ls->end,
-                                  "chmod(\\\"%*s\\\") failed %E",
+                                  "chmod(\\\"%s\\\") failed %E",
                                   filename, nxt_errno);
             goto fail;
         }
@@ -1051,6 +1150,7 @@ nxt_main_port_modules_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
     nxt_mp_t               *mp;
     nxt_int_t              ret;
     nxt_buf_t              *b;
+    nxt_port_t             *port;
     nxt_runtime_t          *rt;
     nxt_conf_value_t       *conf, *root, *value;
     nxt_app_lang_module_t  *lang;
@@ -1061,6 +1161,14 @@ nxt_main_port_modules_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
 
     if (msg->port_msg.pid != rt->port_by_type[NXT_PROCESS_DISCOVERY]->pid) {
         return;
+    }
+
+    port = nxt_runtime_port_find(task->thread->runtime, msg->port_msg.pid,
+                                 msg->port_msg.reply_port);
+
+    if (nxt_fast_path(port != NULL)) {
+        (void) nxt_port_socket_write(task, port, NXT_PORT_MSG_RPC_ERROR, -1,
+                                     msg->port_msg.stream, 0, NULL);
     }
 
     b = msg->buf;
@@ -1203,5 +1311,39 @@ nxt_main_port_conf_store_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
 
 error:
 
-    nxt_log(task, NXT_LOG_ALERT, "failed to store current configuration");
+    nxt_alert(task, "failed to store current configuration");
+}
+
+
+static void
+nxt_main_port_access_log_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
+{
+    u_char               *path;
+    nxt_int_t            ret;
+    nxt_file_t           file;
+    nxt_port_t           *port;
+    nxt_port_msg_type_t  type;
+
+    nxt_debug(task, "opening access log file");
+
+    path = msg->buf->mem.pos;
+
+    nxt_memzero(&file, sizeof(nxt_file_t));
+
+    file.name = (nxt_file_name_t *) path;
+    file.log_level = NXT_LOG_ERR;
+
+    ret = nxt_file_open(task, &file, O_WRONLY | O_APPEND, O_CREAT,
+                        NXT_FILE_OWNER_ACCESS);
+
+    type = (ret == NXT_OK) ? NXT_PORT_MSG_RPC_READY_LAST | NXT_PORT_MSG_CLOSE_FD
+                           : NXT_PORT_MSG_RPC_ERROR;
+
+    port = nxt_runtime_port_find(task->thread->runtime, msg->port_msg.pid,
+                                 msg->port_msg.reply_port);
+
+    if (nxt_fast_path(port != NULL)) {
+        (void) nxt_port_socket_write(task, port, type, file.fd,
+                                     msg->port_msg.stream, 0, NULL);
+    }
 }

@@ -11,9 +11,10 @@
 #include <nxt_auto_config.h>
 
 
-#define NXT_VERSION                  "0.3"
-#define NXT_VERNUM                   3
+#define NXT_VERSION                  "1.3"
+#define NXT_VERNUM                   10300
 
+#define NXT_SERVER                   "Unit/" NXT_VERSION
 
 typedef struct nxt_port_s            nxt_port_t;
 typedef struct nxt_task_s            nxt_task_t;

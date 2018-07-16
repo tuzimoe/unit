@@ -24,6 +24,10 @@ nxt_conn_io_write(nxt_task_t *task, void *obj, void *data)
 
     nxt_debug(task, "conn write fd:%d", c->socket.fd);
 
+    if (c->socket.error != 0) {
+        goto error;
+    }
+
     if (!c->socket.write_ready || c->write == NULL) {
         return;
     }
@@ -74,7 +78,7 @@ nxt_conn_io_write(nxt_task_t *task, void *obj, void *data)
 
     } while (sb.limit != 0);
 
-    nxt_debug(task, "event conn: %i sent:%z", ret, sb.sent);
+    nxt_debug(task, "event conn: %z sent:%O", ret, sb.sent);
 
     if (sb.sent != 0) {
         if (c->write_state->timer_autoreset) {
@@ -109,22 +113,25 @@ nxt_conn_io_write(nxt_task_t *task, void *obj, void *data)
     }
 
     if (ret == 0 || sb.sent != 0) {
-        /* "ret == 0" means a sync buffer was processed. */
+        /*
+         * ret == 0 means a sync buffer was processed.
+         * ret == NXT_ERROR is ignored here if some data was sent,
+         * the error will be handled on the next nxt_conn_write() call.
+         */
         c->sent += sb.sent;
         nxt_work_queue_add(c->write_work_queue, c->write_state->ready_handler,
                            task, c, data);
-        /*
-         * Fall through if first operations were
-         * successful but the last one failed.
-         */
+        return;
     }
 
-    if (nxt_slow_path(ret == NXT_ERROR)) {
-        nxt_fd_event_block_write(engine, &c->socket);
+    /* ret == NXT_ERROR */
 
-        nxt_work_queue_add(c->write_work_queue, c->write_state->error_handler,
-                           task, c, data);
-    }
+    nxt_fd_event_block_write(engine, &c->socket);
+
+error:
+
+    nxt_work_queue_add(c->write_work_queue, c->write_state->error_handler,
+                       task, c, data);
 }
 
 
@@ -178,7 +185,7 @@ nxt_conn_io_writev(nxt_task_t *task, nxt_sendbuf_t *sb, struct iovec *iov,
 
         err = (n == -1) ? nxt_socket_errno : 0;
 
-        nxt_debug(task, "writev(%d, %ui): %d", sb->socket, niov, n);
+        nxt_debug(task, "writev(%d, %ui): %z", sb->socket, niov, n);
 
         if (n > 0) {
             return n;
@@ -351,7 +358,7 @@ nxt_event_conn_io_writev(nxt_conn_t *c, nxt_iobuf_t *iob, nxt_uint_t niob)
 
         err = (n == -1) ? nxt_socket_errno : 0;
 
-        nxt_debug(c->socket.task, "writev(%d, %ui): %d", c->socket.fd, niob, n);
+        nxt_debug(c->socket.task, "writev(%d, %ui): %z", c->socket.fd, niob, n);
 
         if (n > 0) {
             return n;

@@ -1,136 +1,221 @@
-import unit
 import unittest
+import unit
 
 class TestUnitConfiguration(unit.TestUnitControl):
 
-    def test_json_applications(self):
-        self.assertIn('error', self.put('/applications', '"{}"'),
-            'applications string')
-        self.assertIn('error', self.put('/applications', '{'),
-            'applications miss brace')
+    def setUpClass():
+        unit.TestUnit().check_modules('python')
 
-        self.assertIn('error', self.put('/applications', """
-            {
-                app": {
-                    "type": "python",
-                    "workers": 1,
-                    "path": "/app",
-                    "module": "wsgi"
-                }
-            }
-            """), 'applications miss quote')
+    def test_json_empty(self):
+        self.assertIn('error', self.conf(''), 'empty')
 
-        self.assertIn('error', self.put('/applications', """
-            {
-                "app" {
-                    "type": "python",
-                    "workers": 1,
-                    "path": "/app",
-                    "module": "wsgi"
-                }
-            }
-            """), 'applications miss colon')
+    def test_json_leading_zero(self):
+        self.assertIn('error', self.conf('00'), 'leading zero')
 
-        self.assertIn('error', self.put('/applications', """
-            {
-                "app": {
-                    "type": "python"
-                    "workers": 1,
-                    "path": "/app",
-                    "module": "wsgi"
-                }
-            }
-            """), 'applications miss comma')
-
-        self.assertIn('success', self.put('/applications', b'{ \n\r\t}'),
-            'skip space')
-
-        self.assertIn('success', self.put('/applications', """
-            {
-                "app": {
-                    "type": "python",
-                    "workers": 1,
-                    "path": "../app",
-                    "module": "wsgi"
-                }
-            }
-            """), 'relative path')
-
-        self.assertIn('success', self.put('/applications', b"""
+    def test_json_unicode(self):
+        self.assertIn('success', self.conf(b"""
             {
                 "ap\u0070": {
                     "type": "\u0070ython",
-                    "workers": 1,
+                    "processes": { "spare": 0 },
                     "path": "\u002Fapp",
                     "module": "wsgi"
                 }
             }
-            """), 'unicode')
+            """, '/applications'), 'unicode')
 
-        self.assertIn('success', self.put('/applications', """
-            {
-                "приложение": {
-                    "type": "python",
-                    "workers": 1,
-                    "path": "/app",
-                    "module": "wsgi"
-                }
+        self.assertDictEqual(self.conf_get('/applications'), {
+            "app": {
+                "type": "python",
+                "processes": { "spare": 0 },
+                "path": "/app",
+                "module": "wsgi"
             }
-            """), 'unicode 2')
+        }, 'unicode get')
 
-        self.assertIn('error', self.put('/applications', b"""
-            {
-                "app": {
-                    "type": "python",
-                    "workers": \u0031,
-                    "path": "/app",
-                    "module": "wsgi"
-                }
+    def test_json_unicode_2(self):
+        self.assertIn('success', self.conf({
+            "приложение": {
+                "type": "python",
+                "processes": { "spare": 0 },
+                "path": "/app",
+                "module": "wsgi"
             }
-            """), 'unicode number')
+        }, '/applications'), 'unicode 2')
 
-    def test_json_listeners(self):
-        self.assertIn('error', self.put('/listeners',
-            '{"*:8080":{"application":"app"}}'), 'listeners no app')
+        self.assertIn('приложение', self.conf_get('/applications'),
+            'unicode 2 get')
 
-        self.put('/applications', """
+    def test_json_unicode_number(self):
+        self.assertIn('error', self.conf(b"""
             {
                 "app": {
                     "type": "python",
-                    "workers": 1,
+                    "processes": { "spare": \u0030 },
                     "path": "/app",
                     "module": "wsgi"
                 }
             }
-            """)
+            """, '/applications'), 'unicode number')
 
-        self.assertIn('success', self.put('/listeners',
-            '{"*:8080":{"application":"app"}}'), 'listeners wildcard')
-        self.assertIn('success', self.put('/listeners',
-            '{"127.0.0.1:8081":{"application":"app"}}'), 'listeners explicit')
-        self.assertIn('success', self.put('/listeners',
-            '{"[::1]:8082":{"application":"app"}}'), 'listeners explicit ipv6')
-        self.assertIn('error', self.put('/listeners',
-            '{"127.0.0.1":{"application":"app"}}'), 'listeners no port')
+    def test_applications_open_brace(self):
+        self.assertIn('error', self.conf('{', '/applications'), 'open brace')
 
-    @unittest.skip("TODO")
-    def test_broken(self):
-        self.assertIn('error', self.put('/', '00'), 'leading zero')
-        self.assertIn('error', self.put('/listeners', '{"*:8080":{}}'),
+    def test_applications_string(self):
+        self.assertIn('error', self.conf('"{}"', '/applications'), 'string')
+
+    def test_applications_type_only(self):
+        self.skip_alerts.extend([
+            r'python module is empty',
+            r'failed to apply new conf',
+            r'process \d+ exited on signal'
+        ])
+
+        self.assertIn('error', self.conf({
+            "app": {
+                "type": "python"
+            }
+        }, '/applications'), 'type only')
+
+    def test_applications_miss_quote(self):
+        self.assertIn('error', self.conf("""
+            {
+                app": {
+                    "type": "python",
+                    "processes": { "spare": 0 },
+                    "path": "/app",
+                    "module": "wsgi"
+                }
+            }
+            """, '/applications'), 'miss quote')
+
+    def test_applications_miss_colon(self):
+        self.assertIn('error', self.conf("""
+            {
+                "app" {
+                    "type": "python",
+                    "processes": { "spare": 0 },
+                    "path": "/app",
+                    "module": "wsgi"
+                }
+            }
+            """, '/applications'), 'miss colon')
+
+    def test_applications_miss_comma(self):
+        self.assertIn('error', self.conf("""
+            {
+                "app": {
+                    "type": "python"
+                    "processes": { "spare": 0 },
+                    "path": "/app",
+                    "module": "wsgi"
+                }
+            }
+            """, '/applications'), 'miss comma')
+
+    def test_applications_skip_spaces(self):
+        self.assertIn('success', self.conf(b'{ \n\r\t}', '/applications'),
+            'skip spaces')
+
+    def test_applications_relative_path(self):
+        self.assertIn('success', self.conf({
+            "app": {
+                "type": "python",
+                "processes": { "spare": 0 },
+                "path": "../app",
+                "module": "wsgi"
+            }
+        }, '/applications'), 'relative path')
+
+    @unittest.expectedFailure
+    def test_listeners_empty(self):
+        self.skip_sanitizer = True
+        self.skip_alerts.extend([
+            r'failed to apply previous configuration',
+            r'sendmsg.+failed',
+            r'process \d+ exited on signal'
+        ])
+
+        self.assertIn('error', self.conf({"*:7080":{}}, '/listeners'),
             'listener empty')
-        self.assertIn('error', self.put('/applications', '"type":"python"'),
-            'application type only')
 
-        self.assertIn('error', self.put('/applications', """
-            {
+    def test_listeners_no_app(self):
+        self.assertIn('error', self.conf({"*:7080":{"application":"app"}},
+            '/listeners'), 'listeners no app')
+
+    def test_listeners_wildcard(self):
+        self.assertIn('success', self.conf({
+            "listeners": {
+                "*:7080": {
+                    "application":"app"
+                }
+            },
+            "applications": {
                 "app": {
                     "type": "python",
-                    "workers": 1,
+                    "processes": { "spare": 0 },
                     "path": "/app",
                     "module": "wsgi"
                 }
             }
-            """), 'negative workers')
+        }), 'listeners wildcard')
+
+    def test_listeners_explicit(self):
+        self.assertIn('success', self.conf({
+            "listeners": {
+                "127.0.0.1:7080": {
+                    "application":"app"
+                }
+            },
+            "applications": {
+                "app": {
+                    "type": "python",
+                    "processes": { "spare": 0 },
+                    "path": "/app",
+                    "module": "wsgi"
+                }
+            }
+        }), 'explicit')
+
+    def test_listeners_explicit_ipv6(self):
+        self.assertIn('success', self.conf({
+            "listeners": {
+                "[::1]:7080": {
+                    "application":"app"
+                }
+            },
+            "applications": {
+                "app": {
+                    "type": "python",
+                    "processes": { "spare": 0 },
+                    "path": "/app",
+                    "module": "wsgi"
+                }
+            }
+        }), 'explicit ipv6')
+
+    def test_listeners_no_port(self):
+        self.skip_alerts.extend([
+            r'invalid listener "127\.0\.0\.1"',
+            r'failed to apply new conf',
+            r'process \d+ exited on signal'
+        ])
+
+        self.assertIn('error', self.conf({
+            "listeners": {
+                "127.0.0.1": {
+                    "application":"app"
+                }
+            },
+            "applications": {
+                "app": {
+                    "type": "python",
+                    "processes": { "spare": 0 },
+                    "path": "/app",
+                    "module": "wsgi"
+                }
+            }
+        }), 'no port')
 
 if __name__ == '__main__':
     unittest.main()

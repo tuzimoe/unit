@@ -1,4 +1,5 @@
 MODULES+=		python
+MODULE_SUFFIX_python=	python
 
 MODULE_SUMMARY_python=	Python module for NGINX Unit
 
@@ -12,7 +13,13 @@ MODULE_INSTARGS_python=	python-install
 MODULE_SOURCES_python=	unit.example-python-app \
 			unit.example-python-config
 
-BUILD_DEPENDS+=		python-devel
+ifeq ($(shell rpm --eval "%{?amzn}"), 1)
+BUILD_DEPENDS_python=	python26-devel
+else
+BUILD_DEPENDS_python=	python-devel
+endif
+
+BUILD_DEPENDS+=		$(BUILD_DEPENDS_python)
 
 define MODULE_PREINSTALL_python
 %{__mkdir} -p %{buildroot}%{_datadir}/doc/unit-python/examples/python-app

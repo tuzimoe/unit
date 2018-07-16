@@ -25,6 +25,11 @@ struct nxt_port_rpc_reg_s {
 };
 
 
+static void
+nxt_port_rpc_remove_from_peers(nxt_task_t *task, nxt_port_t *port,
+    nxt_port_rpc_reg_t *reg);
+
+
 static nxt_int_t
 nxt_rpc_reg_test(nxt_lvlhsh_query_t *lhq, void *data)
 {
@@ -101,7 +106,7 @@ nxt_port_rpc_register_handler_ex(nxt_task_t *task, nxt_port_t *port,
     nxt_assert(port->pair[0] != -1);
 
     stream =
-        (uint32_t) nxt_atomic_fetch_add(&nxt_stream_ident, 1) & 0x3fffffff;
+        (uint32_t) nxt_atomic_fetch_add(&nxt_stream_ident, 1) & 0x3FFFFFFF;
 
     reg = nxt_mp_zalloc(port->mem_pool, sizeof(nxt_port_rpc_reg_t) + ex_size);
 
@@ -138,6 +143,8 @@ nxt_port_rpc_register_handler_ex(nxt_task_t *task, nxt_port_t *port,
 
     nxt_debug(task, "rpc: stream #%uD registered", stream);
 
+    nxt_port_inc_use(port);
+
     return reg->data;
 }
 
@@ -168,10 +175,17 @@ nxt_port_rpc_ex_set_peer(nxt_task_t *task, nxt_port_t *port,
 
     nxt_assert(reg->data == ex);
 
-    if (peer == -1 || reg->peer != -1) {
-        nxt_log_error(NXT_LOG_ERR, task->log, "rpc: stream #%uD failed to "
-                      "change peer %PI->%PI", reg->stream, reg->peer, peer);
+    if (nxt_slow_path(peer == reg->peer)) {
+        return;
+    }
 
+    if (reg->peer != -1) {
+        nxt_port_rpc_remove_from_peers(task, port, reg);
+
+        reg->peer = -1;
+    }
+
+    if (peer == -1) {
         return;
     }
 
@@ -204,7 +218,7 @@ nxt_port_rpc_ex_set_peer(nxt_task_t *task, nxt_port_t *port,
         break;
 
     default:
-        nxt_log_error(NXT_LOG_ERR, task->log, "rpc: stream #%uD failed to add "
+        nxt_log_error(NXT_LOG_ERR, task->log, "rpc: failed to add "
                       "peer for stream #%uD (%d)", reg->stream, ret);
 
         reg->peer = -1;
@@ -236,6 +250,7 @@ nxt_port_rpc_remove_from_peers(nxt_task_t *task, nxt_port_t *port,
                       "registration (%p)", stream, reg->peer, reg->link.next);
 
             ret = nxt_lvlhsh_delete(&port->rpc_peers, &lhq);
+
         } else {
             nxt_debug(task, "rpc: stream #%uD remove first pid %PI "
                       "registration (%p)", stream, reg->peer, reg->link.next);
@@ -250,6 +265,7 @@ nxt_port_rpc_remove_from_peers(nxt_task_t *task, nxt_port_t *port,
 
             ret = nxt_lvlhsh_insert(&port->rpc_peers, &lhq);
         }
+
     } else {
         nxt_debug(task, "rpc: stream #%uD remove pid %PI "
                   "registration (%p)", stream, reg->peer, reg->link.next);
@@ -302,10 +318,6 @@ nxt_port_rpc_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
 
     reg = lhq.value;
 
-    if (reg->peer != -1) {
-        nxt_assert(reg->peer == msg->port_msg.pid);
-    }
-
     if (type == _NXT_PORT_MSG_RPC_ERROR) {
         reg->error_handler(task, msg, reg->data);
 
@@ -324,6 +336,8 @@ nxt_port_rpc_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg)
     nxt_debug(task, "rpc: stream #%uD free registration", stream);
 
     nxt_mp_free(port->mem_pool, reg);
+
+    nxt_port_use(task, port, -1);
 }
 
 
@@ -359,7 +373,6 @@ nxt_port_rpc_remove_peer(nxt_task_t *task, nxt_port_t *port, nxt_pid_t peer)
 
     msg.port_msg.pid = peer;
     msg.port_msg.type = _NXT_PORT_MSG_REMOVE_PID;
-    msg.port_msg.last = 1;
 
     peer_link = lhq.value;
     last = 0;
@@ -375,20 +388,7 @@ nxt_port_rpc_remove_peer(nxt_task_t *task, nxt_port_t *port, nxt_pid_t peer)
         nxt_debug(task, "rpc: stream #%uD trigger error", stream);
 
         msg.port_msg.stream = stream;
-
-        reg->error_handler(task, &msg, reg->data);
-
-        nxt_port_rpc_lhq_stream(&lhq, &stream);
-        lhq.pool = port->mem_pool;
-
-        ret = nxt_lvlhsh_delete(&port->rpc_streams, &lhq);
-
-        if (nxt_slow_path(ret != NXT_OK)) {
-            nxt_log_error(NXT_LOG_ERR, task->log,
-                          "rpc: stream #%uD failed to delete handler", stream);
-
-            return;
-        }
+        msg.port_msg.last = 1;
 
         if (peer_link == peer_link->next) {
             nxt_assert(peer_link->prev == peer_link);
@@ -405,7 +405,30 @@ nxt_port_rpc_remove_peer(nxt_task_t *task, nxt_port_t *port, nxt_pid_t peer)
             peer_link = next_link;
         }
 
+        reg->peer = -1;
+
+        reg->error_handler(task, &msg, reg->data);
+
+        /* Reset 'last' flag to preserve rpc handler. */
+        if (msg.port_msg.last == 0) {
+            continue;
+        }
+
+        nxt_port_rpc_lhq_stream(&lhq, &stream);
+        lhq.pool = port->mem_pool;
+
+        ret = nxt_lvlhsh_delete(&port->rpc_streams, &lhq);
+
+        if (nxt_slow_path(ret != NXT_OK)) {
+            nxt_log_error(NXT_LOG_ERR, task->log,
+                          "rpc: stream #%uD failed to delete handler", stream);
+
+            return;
+        }
+
         nxt_mp_free(port->mem_pool, reg);
+
+        nxt_port_use(task, port, -1);
     }
 }
 
@@ -437,4 +460,39 @@ nxt_port_rpc_cancel(nxt_task_t *task, nxt_port_t *port, uint32_t stream)
     nxt_debug(task, "rpc: stream #%uD cancel registration", stream);
 
     nxt_mp_free(port->mem_pool, reg);
+
+    nxt_port_use(task, port, -1);
+}
+
+static nxt_buf_t  nxt_port_close_dummy_buf;
+
+void
+nxt_port_rpc_close(nxt_task_t *task, nxt_port_t *port)
+{
+    nxt_port_rpc_reg_t   *reg;
+    nxt_port_recv_msg_t  msg;
+
+    for ( ;; ) {
+        reg = nxt_lvlhsh_peek(&port->rpc_streams, &lvlhsh_rpc_reg_proto);
+        if (reg == NULL) {
+            return;
+        }
+
+        msg.fd = -1;
+        msg.buf = &nxt_port_close_dummy_buf;
+        msg.port = port;
+        msg.port_msg.stream = reg->stream;
+        msg.port_msg.pid = nxt_pid;
+        msg.port_msg.type = _NXT_PORT_MSG_RPC_ERROR;
+        msg.port_msg.last = 1;
+        msg.port_msg.mmap = 0;
+        msg.port_msg.nf = 0;
+        msg.port_msg.mf = 0;
+        msg.port_msg.tracking = 0;
+        msg.size = sizeof(msg.port_msg);
+        msg.cancelled = 0;
+        msg.u.data = NULL;
+
+        nxt_port_rpc_handler(task, &msg);
+    }
 }

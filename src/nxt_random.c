@@ -58,13 +58,19 @@ nxt_random_stir(nxt_random_t *r)
         u_char      bytes[NXT_RANDOM_KEY_SIZE];
     } key;
 
-    n = 0;
-
 #if (NXT_HAVE_GETRANDOM)
 
-    /* Linux 3.17 getrandom(). */
+    n = getrandom(&key, NXT_RANDOM_KEY_SIZE, 0);
 
-    n = getrandom(key, NXT_RANDOM_KEY_SIZE, 0);
+#elif (NXT_HAVE_LINUX_SYS_GETRANDOM)
+
+    /* Linux 3.17 SYS_getrandom. */
+
+    n = syscall(SYS_getrandom, &key, NXT_RANDOM_KEY_SIZE, 0);
+
+#else
+
+    n = 0;
 
 #endif
 
@@ -174,7 +180,7 @@ nxt_random_test(nxt_thread_t *thr)
 
     r.count = 400000;
 
-    nxt_random_add(&r, (u_char *) "arc4random", sizeof("arc4random") - 1);
+    nxt_random_add(&r, (u_char *) "arc4random", nxt_length("arc4random"));
 
     /*
      * Test arc4random() numbers.

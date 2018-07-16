@@ -18,6 +18,7 @@ struct nxt_port_handlers_s {
     nxt_port_handler_t  socket;
     nxt_port_handler_t  modules;
     nxt_port_handler_t  conf_store;
+    nxt_port_handler_t  access_log;
 
     /* File descriptor exchange. */
     nxt_port_handler_t  change_file;
@@ -39,7 +40,7 @@ struct nxt_port_handlers_s {
 
 
 #define nxt_port_handler_idx(name)                                            \
-    ( &((nxt_port_handlers_t *) 0)->name - (nxt_port_handler_t *) 0)
+    ( offsetof(nxt_port_handlers_t, name) / sizeof(nxt_port_handler_t) )
 
 
 typedef enum {
@@ -56,6 +57,7 @@ typedef enum {
     _NXT_PORT_MSG_SOCKET        = nxt_port_handler_idx(socket),
     _NXT_PORT_MSG_MODULES       = nxt_port_handler_idx(modules),
     _NXT_PORT_MSG_CONF_STORE    = nxt_port_handler_idx(conf_store),
+    _NXT_PORT_MSG_ACCESS_LOG    = nxt_port_handler_idx(access_log),
 
     _NXT_PORT_MSG_CHANGE_FILE   = nxt_port_handler_idx(change_file),
     _NXT_PORT_MSG_NEW_PORT      = nxt_port_handler_idx(new_port),
@@ -67,26 +69,27 @@ typedef enum {
 
     _NXT_PORT_MSG_DATA          = nxt_port_handler_idx(data),
 
-    NXT_PORT_MSG_MAX            = sizeof(nxt_port_handlers_t) /
-                                      sizeof(nxt_port_handler_t),
+    NXT_PORT_MSG_MAX            = sizeof(nxt_port_handlers_t)
+                                  / sizeof(nxt_port_handler_t),
 
     NXT_PORT_MSG_RPC_READY      = _NXT_PORT_MSG_RPC_READY,
     NXT_PORT_MSG_RPC_READY_LAST = _NXT_PORT_MSG_RPC_READY | NXT_PORT_MSG_LAST,
     NXT_PORT_MSG_RPC_ERROR      = _NXT_PORT_MSG_RPC_ERROR | NXT_PORT_MSG_LAST,
 
-    NXT_PORT_MSG_START_WORKER   = _NXT_PORT_MSG_START_WORKER |
-                                  NXT_PORT_MSG_LAST,
+    NXT_PORT_MSG_START_WORKER   = _NXT_PORT_MSG_START_WORKER
+                                  | NXT_PORT_MSG_LAST,
     NXT_PORT_MSG_SOCKET         = _NXT_PORT_MSG_SOCKET | NXT_PORT_MSG_LAST,
     NXT_PORT_MSG_MODULES        = _NXT_PORT_MSG_MODULES | NXT_PORT_MSG_LAST,
     NXT_PORT_MSG_CONF_STORE     = _NXT_PORT_MSG_CONF_STORE | NXT_PORT_MSG_LAST,
+    NXT_PORT_MSG_ACCESS_LOG     = _NXT_PORT_MSG_ACCESS_LOG | NXT_PORT_MSG_LAST,
 
     NXT_PORT_MSG_CHANGE_FILE    = _NXT_PORT_MSG_CHANGE_FILE | NXT_PORT_MSG_LAST,
     NXT_PORT_MSG_NEW_PORT       = _NXT_PORT_MSG_NEW_PORT | NXT_PORT_MSG_LAST,
-    NXT_PORT_MSG_MMAP           = _NXT_PORT_MSG_MMAP | NXT_PORT_MSG_LAST |
-                                  NXT_PORT_MSG_CLOSE_FD | NXT_PORT_MSG_SYNC,
+    NXT_PORT_MSG_MMAP           = _NXT_PORT_MSG_MMAP | NXT_PORT_MSG_LAST
+                                  | NXT_PORT_MSG_CLOSE_FD | NXT_PORT_MSG_SYNC,
 
-    NXT_PORT_MSG_PROCESS_READY  = _NXT_PORT_MSG_PROCESS_READY |
-                                  NXT_PORT_MSG_LAST,
+    NXT_PORT_MSG_PROCESS_READY  = _NXT_PORT_MSG_PROCESS_READY
+                                  | NXT_PORT_MSG_LAST,
     NXT_PORT_MSG_QUIT           = _NXT_PORT_MSG_QUIT | NXT_PORT_MSG_LAST,
     NXT_PORT_MSG_REMOVE_PID     = _NXT_PORT_MSG_REMOVE_PID | NXT_PORT_MSG_LAST,
 
@@ -102,13 +105,21 @@ typedef struct {
     nxt_port_id_t        reply_port;
 
     uint8_t              type;
+
+    /* Last message for this stream. */
     uint8_t              last;      /* 1 bit */
 
     /* Message data send using mmap, next chunk is a nxt_port_mmap_msg_t. */
     uint8_t              mmap;      /* 1 bit */
 
-    uint8_t              nf;
-    uint8_t              mf;
+    /* Non-First fragment in fragmented message sequence. */
+    uint8_t              nf;        /* 1 bit */
+
+    /* More Fragments followed. */
+    uint8_t              mf;        /* 1 bit */
+
+    /* Message delivery tracking enabled, next chunk is tracking msg. */
+    uint8_t              tracking;  /* 1 bit */
 } nxt_port_msg_t;
 
 
@@ -119,6 +130,7 @@ typedef struct {
     nxt_fd_t            fd;
     nxt_bool_t          close_fd;
     nxt_port_msg_t      port_msg;
+    uint32_t            tracking_msg[2];
 
     nxt_work_t          work;
 } nxt_port_send_msg_t;
@@ -130,6 +142,7 @@ struct nxt_port_recv_msg_s {
     nxt_port_t          *port;
     nxt_port_msg_t      port_msg;
     size_t              size;
+    nxt_bool_t          cancelled;
     union {
         nxt_port_t      *new_port;
         nxt_pid_t       removed_pid;
@@ -148,6 +161,9 @@ struct nxt_port_s {
     nxt_queue_link_t    app_link;   /* for nxt_app_t.ports */
     nxt_app_t           *app;
 
+    nxt_queue_link_t    idle_link;  /* for nxt_app_t.idle_ports */
+    nxt_msec_t          idle_start;
+
     nxt_queue_t         messages;   /* of nxt_port_send_msg_t */
     nxt_thread_mutex_t  write_mutex;
 
@@ -156,8 +172,9 @@ struct nxt_port_s {
     /* Maximum interleave of message parts. */
     uint32_t            max_share;
 
-    uint32_t            app_requests;
+    uint32_t            app_pending_responses;
     uint32_t            app_responses;
+    nxt_queue_t         pending_requests;
 
     nxt_port_handler_t  handler;
     nxt_port_handler_t  *data;
@@ -221,9 +238,18 @@ void nxt_port_write_enable(nxt_task_t *task, nxt_port_t *port);
 void nxt_port_write_close(nxt_port_t *port);
 void nxt_port_read_enable(nxt_task_t *task, nxt_port_t *port);
 void nxt_port_read_close(nxt_port_t *port);
-nxt_int_t nxt_port_socket_write(nxt_task_t *task, nxt_port_t *port,
+nxt_int_t nxt_port_socket_twrite(nxt_task_t *task, nxt_port_t *port,
     nxt_uint_t type, nxt_fd_t fd, uint32_t stream, nxt_port_id_t reply_port,
-    nxt_buf_t *b);
+    nxt_buf_t *b, void *tracking);
+
+nxt_inline nxt_int_t
+nxt_port_socket_write(nxt_task_t *task, nxt_port_t *port,
+    nxt_uint_t type, nxt_fd_t fd, uint32_t stream, nxt_port_id_t reply_port,
+    nxt_buf_t *b)
+{
+    return nxt_port_socket_twrite(task, port, type, fd, stream, reply_port, b,
+                                  NULL);
+}
 
 void nxt_port_enable(nxt_task_t *task, nxt_port_t *port,
     nxt_port_handlers_t *handlers);
@@ -245,5 +271,10 @@ void nxt_port_empty_handler(nxt_task_t *task, nxt_port_recv_msg_t *msg);
 nxt_int_t nxt_port_post(nxt_task_t *task, nxt_port_t *port,
     nxt_port_post_handler_t handler, void *data);
 void nxt_port_use(nxt_task_t *task, nxt_port_t *port, int i);
+
+nxt_inline void nxt_port_inc_use(nxt_port_t *port)
+{
+    nxt_atomic_fetch_add(&port->use_count, 1);
+}
 
 #endif /* _NXT_PORT_H_INCLUDED_ */

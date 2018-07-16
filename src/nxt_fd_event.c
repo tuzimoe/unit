@@ -46,7 +46,7 @@ nxt_fd_event_hash_add(nxt_lvlhsh_t *lvlhsh, nxt_fd_t fd, nxt_fd_event_t *ev)
         return NXT_OK;
     }
 
-    nxt_log(ev->task, NXT_LOG_CRIT, "fd event %d is already in hash", ev->fd);
+    nxt_alert(ev->task, "fd event %d is already in hash", ev->fd);
 
     return NXT_ERROR;
 }
@@ -96,35 +96,17 @@ nxt_fd_event_hash_delete(nxt_task_t *task, nxt_lvlhsh_t *lvlhsh, nxt_fd_t fd,
 void
 nxt_fd_event_hash_destroy(nxt_lvlhsh_t *lvlhsh)
 {
-    nxt_int_t           ret;
-    nxt_fd_event_t      *ev;
-    nxt_lvlhsh_each_t   lhe;
-    nxt_lvlhsh_query_t  lhq;
+    nxt_fd_event_t  *ev;
 
-    nxt_memzero(&lhe, sizeof(nxt_lvlhsh_each_t));
-    lhe.proto = &nxt_event_set_fd_hash_proto;
-    lhq.proto = &nxt_event_set_fd_hash_proto;
+    do {
+        ev = nxt_lvlhsh_retrieve(lvlhsh, &nxt_event_set_fd_hash_proto, NULL);
 
-    for ( ;; ) {
-        ev = nxt_lvlhsh_each(lvlhsh, &lhe);
-
-        if (ev == NULL) {
-            return;
-        }
-
-        lhq.key_hash = nxt_murmur_hash2(&ev->fd, sizeof(nxt_fd_t));
-
-        ret = nxt_lvlhsh_delete(lvlhsh, &lhq);
-
-        if (nxt_slow_path(ret != NXT_OK)) {
-            nxt_fd_event_hash_error(ev->task, ev->fd);
-        }
-    }
+    } while (ev != NULL);
 }
 
 
 static void
 nxt_fd_event_hash_error(nxt_task_t *task, nxt_fd_t fd)
 {
-    nxt_log(task, NXT_LOG_CRIT, "fd event %d not found in hash", fd);
+    nxt_alert(task, "fd event %d not found in hash", fd);
 }

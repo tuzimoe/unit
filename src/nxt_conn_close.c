@@ -30,6 +30,12 @@ nxt_conn_close(nxt_event_engine_t *engine, nxt_conn_t *c)
     nxt_debug(c->socket.task, "conn close fd:%d, to:%d",
               c->socket.fd, c->socket.timedout);
 
+    /*
+     * Disable all pending write operations because on success they
+     * will incorrectly call a ready handler set for nxt_conn_close().
+     */
+    c->write = NULL;
+
     if (c->socket.timedout) {
         /*
          * Resetting of timed out connection on close
@@ -40,9 +46,8 @@ nxt_conn_close(nxt_event_engine_t *engine, nxt_conn_t *c)
                          sizeof(struct linger));
 
         if (nxt_slow_path(ret != 0)) {
-            nxt_log(c->socket.task, NXT_LOG_CRIT,
-                    "setsockopt(%d, SO_LINGER) failed %E",
-                    c->socket.fd, nxt_socket_errno);
+            nxt_alert(c->socket.task, "setsockopt(%d, SO_LINGER) failed %E",
+                      c->socket.fd, nxt_socket_errno);
         }
     }
 
@@ -57,7 +62,7 @@ nxt_conn_close(nxt_event_engine_t *engine, nxt_conn_t *c)
         wq = &engine->shutdown_work_queue;
         handler = nxt_conn_shutdown_handler;
 
-    } else{
+    } else {
         wq = &engine->close_work_queue;
         handler = nxt_conn_close_handler;
     }

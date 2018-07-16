@@ -132,6 +132,27 @@ nxt_prefetch(a)
 #endif
 
 
+#if (NXT_HAVE_BUILTIN_POPCOUNT)
+
+#define nxt_popcount       __builtin_popcount
+
+#else
+
+nxt_inline int
+nxt_popcount(unsigned int x)
+{
+    int  count;
+
+    for (count = 0; x != 0; count++) {
+        x &= x - 1;
+    }
+
+    return count;
+}
+
+#endif
+
+
 #ifndef NXT_ALIGNMENT
 
 #if (NXT_SOLARIS)
@@ -217,8 +238,8 @@ nxt_min(val1, val2)                                                           \
 #define                                                                       \
 nxt_bswap32(val)                                                              \
     (   ((val)               >> 24)                                           \
-     | (((val) & 0x00ff0000) >>  8)                                           \
-     | (((val) & 0x0000ff00) <<  8)                                           \
+     | (((val) & 0x00FF0000) >>  8)                                           \
+     | (((val) & 0x0000FF00) <<  8)                                           \
      |  ((val)               << 24))
 
 
@@ -239,6 +260,10 @@ nxt_align_ptr(p, a)                                                           \
 #define                                                                       \
 nxt_trunc_ptr(p, a)                                                           \
     (u_char *) ((uintptr_t) (p) & ~((uintptr_t) (a) - 1))
+
+
+#define nxt_length(s)                                                         \
+    (sizeof(s) - 1)
 
 
 #endif /* _NXT_CLANG_H_INCLUDED_ */

@@ -203,7 +203,7 @@ nxt_getsockname(nxt_task_t *task, nxt_mp_t *mp, nxt_socket_t s)
 
 #if (NXT_HAVE_UNIX_DOMAIN)
         case AF_UNIX:
-             length = sizeof("unix:") - 1 + socklen;
+             length = nxt_length("unix:") + socklen;
 #endif
              break;
 
@@ -287,7 +287,7 @@ nxt_sockaddr_text(nxt_sockaddr_t *sa)
 #if (NXT_LINUX)
 
         if (p[0] == '\0') {
-            int  length;
+            size_t  length;
 
             /* Linux abstract socket address has no trailing zero. */
             length = sa->socklen - offsetof(struct sockaddr_un, sun_path);
@@ -478,7 +478,7 @@ nxt_sockaddr_ntop(nxt_sockaddr_t *sa, u_char *buf, u_char *end, nxt_bool_t port)
         p = (u_char *) sa->u.sockaddr_un.sun_path;
 
         if (p[0] == '\0') {
-            int  length;
+            size_t  length;
 
             /* Linux abstract socket address has no trailing zero. */
 
@@ -515,7 +515,7 @@ nxt_inet6_ntop(u_char *addr, u_char *buf, u_char *end)
     nxt_uint_t   i, zero_start, last_zero_start;
 
     const size_t  max_inet6_length =
-                      sizeof("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff") - 1;
+                        nxt_length("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff");
 
     if (buf + max_inet6_length > end) {
         return buf;
@@ -557,7 +557,7 @@ nxt_inet6_ntop(u_char *addr, u_char *buf, u_char *end)
     if (zero_start == 0) {
 
                /* IPv4-mapped address */
-        if ((zero_groups == 5 && addr[10] == 0xff && addr[11] == 0xff)
+        if ((zero_groups == 5 && addr[10] == 0xFF && addr[11] == 0xFF)
                /* IPv4-compatible address */
             || (zero_groups == 6)
                /* not IPv6 loopback address */
@@ -1206,7 +1206,7 @@ nxt_inet6_addr(struct in6_addr *in6_addr, u_char *buf, size_t length)
                 ipv4 = buf;
 
                 *addr++ = (u_char) (group >> 8);
-                *addr++ = (u_char) (group & 0xff);
+                *addr++ = (u_char) (group & 0xFF);
                 groups_left--;
 
                 if (groups_left != 0) {
@@ -1239,8 +1239,8 @@ nxt_inet6_addr(struct in6_addr *in6_addr, u_char *buf, size_t length)
 
             group = ntohl(group);
 
-            *addr++ = (u_char) ((group >> 24) & 0xff);
-            *addr++ = (u_char) ((group >> 16) & 0xff);
+            *addr++ = (u_char) ((group >> 24) & 0xFF);
+            *addr++ = (u_char) ((group >> 16) & 0xFF);
             groups_left--;
 
             /* the low 16-bit are copied below */
@@ -1280,7 +1280,7 @@ nxt_inet6_addr(struct in6_addr *in6_addr, u_char *buf, size_t length)
     }
 
     *addr++ = (u_char) (group >> 8);
-    *addr++ = (u_char) (group & 0xff);
+    *addr++ = (u_char) (group & 0xFF);
     groups_left--;
 
     if (groups_left != 0) {

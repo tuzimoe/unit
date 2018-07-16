@@ -1,6 +1,7 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 
 import unittest
+import sys
 import os
 
 loader = unittest.TestLoader()
@@ -12,3 +13,7 @@ suite.addTests(tests)
 
 runner = unittest.TextTestRunner(verbosity=3)
 result = runner.run(suite)
+
+ret = not (len(result.failures) == len(result.errors) == 0)
+
+sys.exit(ret)

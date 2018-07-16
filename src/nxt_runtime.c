@@ -19,23 +19,13 @@ static nxt_int_t nxt_runtime_systemd_listen_sockets(nxt_task_t *task,
 static nxt_int_t nxt_runtime_event_engines(nxt_task_t *task, nxt_runtime_t *rt);
 static nxt_int_t nxt_runtime_thread_pools(nxt_thread_t *thr, nxt_runtime_t *rt);
 static void nxt_runtime_start(nxt_task_t *task, void *obj, void *data);
-static void nxt_runtime_initial_start(nxt_task_t *task);
-static void nxt_single_process_start(nxt_thread_t *thr, nxt_task_t *task,
-    nxt_runtime_t *rt);
+static void nxt_runtime_initial_start(nxt_task_t *task, nxt_uint_t status);
 static void nxt_runtime_close_idle_connections(nxt_event_engine_t *engine);
 static void nxt_runtime_exit(nxt_task_t *task, void *obj, void *data);
 static nxt_int_t nxt_runtime_event_engine_change(nxt_task_t *task,
     nxt_runtime_t *rt);
 static nxt_int_t nxt_runtime_conf_init(nxt_task_t *task, nxt_runtime_t *rt);
 static nxt_int_t nxt_runtime_conf_read_cmd(nxt_task_t *task, nxt_runtime_t *rt);
-static nxt_sockaddr_t *nxt_runtime_sockaddr_parse(nxt_task_t *task,
-    nxt_mp_t *mp, nxt_str_t *addr);
-static nxt_sockaddr_t *nxt_runtime_sockaddr_unix_parse(nxt_task_t *task,
-    nxt_mp_t *mp, nxt_str_t *addr);
-static nxt_sockaddr_t *nxt_runtime_sockaddr_inet6_parse(nxt_task_t *task,
-    nxt_mp_t *mp, nxt_str_t *addr);
-static nxt_sockaddr_t *nxt_runtime_sockaddr_inet_parse(nxt_task_t *task,
-    nxt_mp_t *mp, nxt_str_t *addr);
 static nxt_int_t nxt_runtime_hostname(nxt_task_t *task, nxt_runtime_t *rt);
 static nxt_int_t nxt_runtime_log_files_init(nxt_runtime_t *rt);
 static nxt_int_t nxt_runtime_log_files_create(nxt_task_t *task,
@@ -157,7 +147,7 @@ nxt_runtime_inherited_listen_sockets(nxt_task_t *task, nxt_runtime_t *rt)
         return nxt_runtime_systemd_listen_sockets(task, rt);
     }
 
-    nxt_log(task, NXT_LOG_CRIT, "using inherited listen sockets: %s", v);
+    nxt_alert(task, "using inherited listen sockets: %s", v);
 
     inherited_sockets = nxt_array_create(rt->mem_pool,
                                          1, sizeof(nxt_listen_socket_t));
@@ -173,9 +163,9 @@ nxt_runtime_inherited_listen_sockets(nxt_task_t *task, nxt_runtime_t *rt)
             s = nxt_int_parse(v, p - v);
 
             if (nxt_slow_path(s < 0)) {
-                nxt_log(task, NXT_LOG_CRIT, "invalid socket number "
-                        "\"%s\" in NGINX environment variable, "
-                        "ignoring the rest of the variable", v);
+                nxt_alert(task, "invalid socket number \"%s\" "
+                          "in NGINX environment variable, "
+                          "ignoring the rest of the variable", v);
                 return NXT_ERROR;
             }
 
@@ -239,7 +229,7 @@ nxt_runtime_systemd_listen_sockets(nxt_task_t *task, nxt_runtime_t *rt)
         return NXT_OK;
     }
 
-    nxt_log(task, NXT_LOG_INFO, "using %s systemd listen sockets", n);
+    nxt_log(task, NXT_LOG_INFO, "using %i systemd listen sockets", n);
 
     inherited_sockets = nxt_array_create(rt->mem_pool,
                                          n, sizeof(nxt_listen_socket_t));
@@ -361,12 +351,12 @@ nxt_runtime_start(nxt_task_t *task, void *obj, void *data)
 
 fail:
 
-    nxt_runtime_quit(task);
+    nxt_runtime_quit(task, 1);
 }
 
 
 static void
-nxt_runtime_initial_start(nxt_task_t *task)
+nxt_runtime_initial_start(nxt_task_t *task, nxt_uint_t status)
 {
     nxt_int_t                    ret;
     nxt_thread_t                 *thr;
@@ -411,51 +401,25 @@ nxt_runtime_initial_start(nxt_task_t *task)
 
     thr->engine->max_connections = rt->engine_connections;
 
-    if (rt->main_process) {
-        if (nxt_main_process_start(thr, task, rt) != NXT_ERROR) {
-            return;
-        }
-
-    } else {
-        nxt_single_process_start(thr, task, rt);
+    if (nxt_main_process_start(thr, task, rt) != NXT_ERROR) {
         return;
     }
 
 fail:
 
-    nxt_runtime_quit(task);
-}
-
-
-static void
-nxt_single_process_start(nxt_thread_t *thr, nxt_task_t *task, nxt_runtime_t *rt)
-{
-    nxt_int_t  ret;
-
-    ret = nxt_runtime_thread_pool_create(thr, rt, rt->auxiliary_threads,
-                                       60000 * 1000000LL);
-
-    if (nxt_slow_path(ret != NXT_OK)) {
-        nxt_runtime_quit(task);
-        return;
-    }
-
-    rt->types |= (1U << NXT_PROCESS_SINGLE);
-
-    nxt_runtime_listen_sockets_enable(task, rt);
-
-    return;
+    nxt_runtime_quit(task, 1);
 }
 
 
 void
-nxt_runtime_quit(nxt_task_t *task)
+nxt_runtime_quit(nxt_task_t *task, nxt_uint_t status)
 {
     nxt_bool_t          done;
     nxt_runtime_t       *rt;
     nxt_event_engine_t  *engine;
 
     rt = task->thread->runtime;
+    rt->status |= status;
     engine = task->thread->engine;
 
     nxt_debug(task, "exiting");
@@ -470,7 +434,7 @@ nxt_runtime_quit(nxt_task_t *task)
             done = 0;
         }
 
-        if (nxt_runtime_is_main(rt)) {
+        if (rt->type == NXT_PROCESS_MAIN) {
             nxt_main_stop_worker_processes(task, rt);
             done = 0;
         }
@@ -514,6 +478,7 @@ nxt_runtime_close_idle_connections(nxt_event_engine_t *engine)
 static void
 nxt_runtime_exit(nxt_task_t *task, void *obj, void *data)
 {
+    int                 status;
     nxt_runtime_t       *rt;
     nxt_process_t       *process;
     nxt_event_engine_t  *engine;
@@ -527,7 +492,7 @@ nxt_runtime_exit(nxt_task_t *task, void *obj, void *data)
         return;
     }
 
-    if (nxt_runtime_is_main(rt)) {
+    if (rt->type == NXT_PROCESS_MAIN) {
         if (rt->pid_file != NULL) {
             nxt_file_delete(rt->pid_file);
         }
@@ -559,11 +524,12 @@ nxt_runtime_exit(nxt_task_t *task, void *obj, void *data)
 
     nxt_thread_mutex_destroy(&rt->processes_mutex);
 
+    status = rt->status;
     nxt_mp_destroy(rt->mem_pool);
 
-    nxt_debug(task, "exit");
+    nxt_debug(task, "exit: %d", status);
 
-    exit(0);
+    exit(status);
     nxt_unreachable();
 }
 
@@ -642,7 +608,7 @@ nxt_runtime_thread_pool_destroy(nxt_task_t *task, nxt_runtime_t *rt,
     n = rt->thread_pools->nelts;
 
     if (n == 0) {
-        cont(task);
+        cont(task, 0);
         return;
     }
 
@@ -695,7 +661,7 @@ nxt_runtime_thread_pool_exit(nxt_task_t *task, void *obj, void *data)
 
             if (n == 1) {
                 /* The last thread pool. */
-                rt->continuation(task);
+                rt->continuation(task, 0);
             }
 
             return;
@@ -717,7 +683,6 @@ nxt_runtime_conf_init(nxt_task_t *task, nxt_runtime_t *rt)
     const nxt_event_interface_t  *interface;
 
     rt->daemon = 1;
-    rt->main_process = 1;
     rt->engine_connections = 256;
     rt->auxiliary_threads = 2;
     rt->user_cred.user = NXT_USER;
@@ -800,10 +765,12 @@ nxt_runtime_conf_init(nxt_task_t *task, nxt_runtime_t *rt)
     control.length = nxt_strlen(rt->control);
     control.start = (u_char *) rt->control;
 
-    sa = nxt_runtime_sockaddr_parse(task, rt->mem_pool, &control);
+    sa = nxt_sockaddr_parse(rt->mem_pool, &control);
     if (nxt_slow_path(sa == NULL)) {
         return NXT_ERROR;
     }
+
+    sa->type = SOCK_STREAM;
 
     rt->controller_listen = sa;
 
@@ -877,7 +844,7 @@ nxt_runtime_conf_read_cmd(nxt_task_t *task, nxt_runtime_t *rt)
 
         if (nxt_strcmp(p, "--control") == 0) {
             if (*argv == NULL) {
-                write(STDERR_FILENO, no_control, sizeof(no_control) - 1);
+                write(STDERR_FILENO, no_control, nxt_length(no_control));
                 return NXT_ERROR;
             }
 
@@ -890,8 +857,7 @@ nxt_runtime_conf_read_cmd(nxt_task_t *task, nxt_runtime_t *rt)
 
         if (nxt_strcmp(p, "--upstream") == 0) {
             if (*argv == NULL) {
-                nxt_log(task, NXT_LOG_CRIT,
-                              "no argument for option \"--upstream\"");
+                nxt_alert(task, "no argument for option \"--upstream\"");
                 return NXT_ERROR;
             }
 
@@ -905,7 +871,7 @@ nxt_runtime_conf_read_cmd(nxt_task_t *task, nxt_runtime_t *rt)
 
         if (nxt_strcmp(p, "--user") == 0) {
             if (*argv == NULL) {
-                write(STDERR_FILENO, no_user, sizeof(no_user) - 1);
+                write(STDERR_FILENO, no_user, nxt_length(no_user));
                 return NXT_ERROR;
             }
 
@@ -918,7 +884,7 @@ nxt_runtime_conf_read_cmd(nxt_task_t *task, nxt_runtime_t *rt)
 
         if (nxt_strcmp(p, "--group") == 0) {
             if (*argv == NULL) {
-                write(STDERR_FILENO, no_group, sizeof(no_group) - 1);
+                write(STDERR_FILENO, no_group, nxt_length(no_group));
                 return NXT_ERROR;
             }
 
@@ -931,7 +897,7 @@ nxt_runtime_conf_read_cmd(nxt_task_t *task, nxt_runtime_t *rt)
 
         if (nxt_strcmp(p, "--pid") == 0) {
             if (*argv == NULL) {
-                write(STDERR_FILENO, no_pid, sizeof(no_pid) - 1);
+                write(STDERR_FILENO, no_pid, nxt_length(no_pid));
                 return NXT_ERROR;
             }
 
@@ -944,7 +910,7 @@ nxt_runtime_conf_read_cmd(nxt_task_t *task, nxt_runtime_t *rt)
 
         if (nxt_strcmp(p, "--log") == 0) {
             if (*argv == NULL) {
-                write(STDERR_FILENO, no_log, sizeof(no_log) - 1);
+                write(STDERR_FILENO, no_log, nxt_length(no_log));
                 return NXT_ERROR;
             }
 
@@ -957,7 +923,7 @@ nxt_runtime_conf_read_cmd(nxt_task_t *task, nxt_runtime_t *rt)
 
         if (nxt_strcmp(p, "--modules") == 0) {
             if (*argv == NULL) {
-                write(STDERR_FILENO, no_modules, sizeof(no_modules) - 1);
+                write(STDERR_FILENO, no_modules, nxt_length(no_modules));
                 return NXT_ERROR;
             }
 
@@ -970,7 +936,7 @@ nxt_runtime_conf_read_cmd(nxt_task_t *task, nxt_runtime_t *rt)
 
         if (nxt_strcmp(p, "--state") == 0) {
             if (*argv == NULL) {
-                write(STDERR_FILENO, no_state, sizeof(no_state) - 1);
+                write(STDERR_FILENO, no_state, nxt_length(no_state));
                 return NXT_ERROR;
             }
 
@@ -987,303 +953,33 @@ nxt_runtime_conf_read_cmd(nxt_task_t *task, nxt_runtime_t *rt)
         }
 
         if (nxt_strcmp(p, "--version") == 0) {
-            write(STDERR_FILENO, version, sizeof(version) - 1);
+            write(STDERR_FILENO, version, nxt_length(version));
             exit(0);
         }
 
-        if (nxt_strcmp(p, "--help") == 0) {
-            write(STDOUT_FILENO, help, sizeof(help) - 1);
+        if (nxt_strcmp(p, "--help") == 0 || nxt_strcmp(p, "-h") == 0) {
+            write(STDOUT_FILENO, help, nxt_length(help));
 
             if (sizeof(NXT_GROUP) == 1) {
-                write(STDOUT_FILENO, primary, sizeof(primary) - 1);
+                write(STDOUT_FILENO, primary, nxt_length(primary));
 
             } else {
-                write(STDOUT_FILENO, group, sizeof(group) - 1);
+                write(STDOUT_FILENO, group, nxt_length(group));
             }
 
             exit(0);
         }
 
-        end = nxt_sprintf(buf, buf + sizeof(buf), "unknown option \"%s\"\n", p);
+        end = nxt_sprintf(buf, buf + sizeof(buf), "unknown option \"%s\", "
+                          "try \"%s -h\" for available options\n",
+                          p, nxt_process_argv[0]);
+
         write(STDERR_FILENO, buf, end - buf);
 
         return NXT_ERROR;
     }
 
     return NXT_OK;
-}
-
-
-static nxt_sockaddr_t *
-nxt_runtime_sockaddr_parse(nxt_task_t *task, nxt_mp_t *mp, nxt_str_t *addr)
-{
-    u_char  *p;
-    size_t  length;
-
-    length = addr->length;
-    p = addr->start;
-
-    if (length >= 5 && nxt_memcmp(p, "unix:", 5) == 0) {
-        return nxt_runtime_sockaddr_unix_parse(task, mp, addr);
-    }
-
-    if (length != 0 && *p == '[') {
-        return nxt_runtime_sockaddr_inet6_parse(task, mp, addr);
-    }
-
-    return nxt_runtime_sockaddr_inet_parse(task, mp, addr);
-}
-
-
-static nxt_sockaddr_t *
-nxt_runtime_sockaddr_unix_parse(nxt_task_t *task, nxt_mp_t *mp, nxt_str_t *addr)
-{
-#if (NXT_HAVE_UNIX_DOMAIN)
-    u_char          *p;
-    size_t          length, socklen;
-    nxt_sockaddr_t  *sa;
-
-    /*
-     * Actual sockaddr_un length can be lesser or even larger than defined
-     * struct sockaddr_un length (see comment in nxt_socket.h).  So
-     * limit maximum Unix domain socket address length by defined sun_path[]
-     * length because some OSes accept addresses twice larger than defined
-     * struct sockaddr_un.  Also reserve space for a trailing zero to avoid
-     * ambiguity, since many OSes accept Unix domain socket addresses
-     * without a trailing zero.
-     */
-    const size_t max_len = sizeof(struct sockaddr_un)
-                           - offsetof(struct sockaddr_un, sun_path) - 1;
-
-    /* cutting "unix:" */
-    length = addr->length - 5;
-    p = addr->start + 5;
-
-    if (length == 0) {
-        nxt_log(task, NXT_LOG_CRIT,
-                "unix domain socket \"%V\" name is invalid", addr);
-        return NULL;
-    }
-
-    if (length > max_len) {
-        nxt_log(task, NXT_LOG_CRIT,
-                "unix domain socket \"%V\" name is too long", addr);
-        return NULL;
-    }
-
-    socklen = offsetof(struct sockaddr_un, sun_path) + length + 1;
-
-#if (NXT_LINUX)
-
-    /*
-     * Linux unix(7):
-     *
-     *   abstract: an abstract socket address is distinguished by the fact
-     *   that sun_path[0] is a null byte ('\0').  The socket's address in
-     *   this namespace is given by the additional bytes in sun_path that
-     *   are covered by the specified length of the address structure.
-     *   (Null bytes in the name have no special significance.)
-     */
-    if (p[0] == '@') {
-        p[0] = '\0';
-        socklen--;
-    }
-
-#endif
-
-    sa = nxt_sockaddr_alloc(mp, socklen, addr->length);
-
-    if (nxt_slow_path(sa == NULL)) {
-        return NULL;
-    }
-
-    sa->type = SOCK_STREAM;
-
-    sa->u.sockaddr_un.sun_family = AF_UNIX;
-    nxt_memcpy(sa->u.sockaddr_un.sun_path, p, length);
-
-    return sa;
-
-#else  /* !(NXT_HAVE_UNIX_DOMAIN) */
-
-    nxt_log(task, NXT_LOG_CRIT, "unix domain socket \"%V\" is not supported",
-            addr);
-
-    return NULL;
-
-#endif
-}
-
-
-static nxt_sockaddr_t *
-nxt_runtime_sockaddr_inet6_parse(nxt_task_t *task, nxt_mp_t *mp,
-    nxt_str_t *addr)
-{
-#if (NXT_INET6)
-    u_char           *p, *addr_end;
-    size_t           length;
-    nxt_int_t        port;
-    nxt_sockaddr_t   *sa;
-    struct in6_addr  *in6_addr;
-
-    length = addr->length - 1;
-    p = addr->start + 1;
-
-    addr_end = nxt_memchr(p, ']', length);
-
-    if (addr_end == NULL) {
-        goto invalid_address;
-    }
-
-    sa = nxt_sockaddr_alloc(mp, sizeof(struct sockaddr_in6),
-                            NXT_INET6_ADDR_STR_LEN);
-    if (nxt_slow_path(sa == NULL)) {
-        return NULL;
-    }
-
-    in6_addr = &sa->u.sockaddr_in6.sin6_addr;
-
-    if (nxt_inet6_addr(in6_addr, p, addr_end - p) != NXT_OK) {
-        goto invalid_address;
-    }
-
-    port = 0;
-    p = addr_end + 1;
-    length = (p + length) - p;
-
-    if (length == 0) {
-        goto found;
-    }
-
-    if (*p == ':') {
-        port = nxt_int_parse(p + 1, length - 1);
-
-        if (port >= 1 && port <= 65535) {
-            goto found;
-        }
-    }
-
-    nxt_log(task, NXT_LOG_CRIT, "invalid port in \"%V\"", addr);
-
-    return NULL;
-
-found:
-
-    sa->type = SOCK_STREAM;
-
-    sa->u.sockaddr_in6.sin6_family = AF_INET6;
-    sa->u.sockaddr_in6.sin6_port = htons((in_port_t) port);
-
-    return sa;
-
-invalid_address:
-
-    nxt_log(task, NXT_LOG_CRIT, "invalid IPv6 address in \"%V\"", addr);
-
-    return NULL;
-
-#else
-
-    nxt_log(task, NXT_LOG_CRIT, "IPv6 socket \"%V\" is not supported", addr);
-
-    return NULL;
-
-#endif
-}
-
-
-static nxt_sockaddr_t *
-nxt_runtime_sockaddr_inet_parse(nxt_task_t *task, nxt_mp_t *mp,
-    nxt_str_t *string)
-{
-    u_char          *p, *ip;
-    size_t          length;
-    in_addr_t       addr;
-    nxt_int_t       port;
-    nxt_sockaddr_t  *sa;
-
-    addr = INADDR_ANY;
-
-    length = string->length;
-    ip = string->start;
-
-    p = nxt_memchr(ip, ':', length);
-
-    if (p == NULL) {
-
-        /* single value port, or address */
-
-        port = nxt_int_parse(ip, length);
-
-        if (port > 0) {
-            /* "*:XX" */
-
-            if (port < 1 || port > 65535) {
-                goto invalid_port;
-            }
-
-        } else {
-            /* "x.x.x.x" */
-
-            addr = nxt_inet_addr(ip, length);
-
-            if (addr == INADDR_NONE) {
-                goto invalid_port;
-            }
-
-            port = 8080;
-        }
-
-    } else {
-
-        /* x.x.x.x:XX */
-
-        p++;
-        length = (ip + length) - p;
-        port = nxt_int_parse(p, length);
-
-        if (port < 1 || port > 65535) {
-            goto invalid_port;
-        }
-
-        length = (p - 1) - ip;
-
-        if (length != 1 || ip[0] != '*') {
-            addr = nxt_inet_addr(ip, length);
-
-            if (addr == INADDR_NONE) {
-                goto invalid_addr;
-            }
-
-            /* "x.x.x.x:XX" */
-        }
-    }
-
-    sa = nxt_sockaddr_alloc(mp, sizeof(struct sockaddr_in),
-                            NXT_INET_ADDR_STR_LEN);
-    if (nxt_slow_path(sa == NULL)) {
-        return NULL;
-    }
-
-    sa->type = SOCK_STREAM;
-
-    sa->u.sockaddr_in.sin_family = AF_INET;
-    sa->u.sockaddr_in.sin_port = htons((in_port_t) port);
-    sa->u.sockaddr_in.sin_addr.s_addr = addr;
-
-    return sa;
-
-invalid_port:
-
-    nxt_log(task, NXT_LOG_CRIT, "invalid port in \"%V\"", string);
-
-    return NULL;
-
-invalid_addr:
-
-    nxt_log(task, NXT_LOG_CRIT, "invalid address in \"%V\"", string);
-
-    return NULL;
 }
 
 
@@ -1324,7 +1020,7 @@ nxt_runtime_hostname(nxt_task_t *task, nxt_runtime_t *rt)
     char    hostname[NXT_MAXHOSTNAMELEN + 1];
 
     if (gethostname(hostname, NXT_MAXHOSTNAMELEN) != 0) {
-        nxt_log(task, NXT_LOG_CRIT, "gethostname() failed %E", nxt_errno);
+        nxt_alert(task, "gethostname() failed %E", nxt_errno);
         return NXT_ERROR;
     }
 
@@ -1367,7 +1063,7 @@ nxt_runtime_log_files_init(nxt_runtime_t *rt)
         file = nxt_list_zero_add(log_files);
 
         file->fd = NXT_FILE_INVALID;
-        file->log_level = NXT_LOG_CRIT;
+        file->log_level = NXT_LOG_ALERT;
 
         return NXT_OK;
     }
@@ -1408,7 +1104,7 @@ nxt_runtime_log_file_add(nxt_runtime_t *rt, nxt_str_t *name)
     }
 
     file->fd = NXT_FILE_INVALID;
-    file->log_level = NXT_LOG_CRIT;
+    file->log_level = NXT_LOG_ALERT;
     file->name = file_name.start;
 
     return file;
@@ -1537,7 +1233,7 @@ nxt_runtime_pid_file_create(nxt_task_t *task, nxt_file_name_t *pid_file)
     ssize_t     length;
     nxt_int_t   n;
     nxt_file_t  file;
-    u_char      pid[NXT_INT64_T_LEN + NXT_LINEFEED_SIZE];
+    u_char      pid[NXT_INT64_T_LEN + nxt_length("\n")];
 
     nxt_memzero(&file, sizeof(nxt_file_t));
 
@@ -1589,8 +1285,7 @@ nxt_runtime_process_new(nxt_runtime_t *rt)
 static void
 nxt_runtime_process_destroy(nxt_runtime_t *rt, nxt_process_t *process)
 {
-    nxt_port_t         *port;
-    nxt_lvlhsh_each_t  lhe;
+    nxt_port_t  *port;
 
     nxt_assert(process->use_count == 0);
     nxt_assert(process->registered == 0);
@@ -1598,13 +1293,10 @@ nxt_runtime_process_destroy(nxt_runtime_t *rt, nxt_process_t *process)
     nxt_port_mmaps_destroy(&process->incoming, 1);
     nxt_port_mmaps_destroy(&process->outgoing, 1);
 
-    port = nxt_port_hash_first(&process->connected_ports, &lhe);
+    do {
+        port = nxt_port_hash_retrieve(&process->connected_ports);
 
-    while(port != NULL) {
-        nxt_port_hash_remove(&process->connected_ports, port);
-
-        port = nxt_port_hash_first(&process->connected_ports, &lhe);
-    }
+    } while (port != NULL);
 
     nxt_thread_mutex_destroy(&process->incoming.mutex);
     nxt_thread_mutex_destroy(&process->outgoing.mutex);
@@ -1842,18 +1534,9 @@ nxt_process_use(nxt_task_t *task, nxt_process_t *process, int i)
 nxt_process_t *
 nxt_runtime_process_first(nxt_runtime_t *rt, nxt_lvlhsh_each_t *lhe)
 {
-    nxt_memzero(lhe, sizeof(nxt_lvlhsh_each_t));
-
-    lhe->proto = &lvlhsh_processes_proto;
+    nxt_lvlhsh_each_init(lhe, &lvlhsh_processes_proto);
 
     return nxt_runtime_process_next(rt, lhe);
-}
-
-
-nxt_port_t *
-nxt_runtime_port_first(nxt_runtime_t *rt, nxt_lvlhsh_each_t *lhe)
-{
-    return nxt_port_hash_first(&rt->ports, lhe);
 }
 
 

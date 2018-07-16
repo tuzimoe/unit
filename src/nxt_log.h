@@ -8,14 +8,12 @@
 #define _NXT_LOG_H_INCLUDED_
 
 
-#define NXT_LOG_EMERG      0
-#define NXT_LOG_ALERT      1
-#define NXT_LOG_CRIT       2
-#define NXT_LOG_ERR        3
-#define NXT_LOG_WARN       4
-#define NXT_LOG_NOTICE     5
-#define NXT_LOG_INFO       6
-#define NXT_LOG_DEBUG      7
+#define NXT_LOG_ALERT      0
+#define NXT_LOG_ERR        1
+#define NXT_LOG_WARN       2
+#define NXT_LOG_NOTICE     3
+#define NXT_LOG_INFO       4
+#define NXT_LOG_DEBUG      5
 
 
 #define NXT_MAX_ERROR_STR  2048
@@ -48,21 +46,11 @@ nxt_log_level_enough(log, level)                                              \
     ((log)->level >= (level))
 
 
-#define                                                                       \
-nxt_log_emerg(_log, ...)                                                      \
+#define nxt_alert(task, ...)                                                  \
     do {                                                                      \
-        nxt_log_t  *_log_ = (_log);                                           \
+        nxt_log_t  *log = (task)->log;                                        \
                                                                               \
-        _log_->handler(NXT_LOG_EMERG, _log_, __VA_ARGS__);                    \
-    } while (0)
-
-
-#define                                                                       \
-nxt_log_alert(_log, ...)                                                      \
-    do {                                                                      \
-        nxt_log_t  *_log_ = (_log);                                           \
-                                                                              \
-        _log_->handler(NXT_LOG_ALERT, _log_, __VA_ARGS__);                    \
+        log->handler(NXT_LOG_ALERT, log, __VA_ARGS__);                        \
     } while (0)
 
 
@@ -84,6 +72,14 @@ nxt_log_alert(_log, ...)                                                      \
         if (nxt_slow_path(log->level >= NXT_LOG_NOTICE || nxt_trace)) {       \
             log->handler(NXT_LOG_NOTICE, log, __VA_ARGS__);                   \
         }                                                                     \
+    } while (0)
+
+
+#define nxt_log_alert(_log, ...)                                              \
+    do {                                                                      \
+        nxt_log_t  *_log_ = (_log);                                           \
+                                                                              \
+        _log_->handler(NXT_LOG_ALERT, _log_, __VA_ARGS__);                    \
     } while (0)
 
 
@@ -122,12 +118,23 @@ nxt_log_debug(_log, ...)                                                      \
     } while (0)
 
 
+#define nxt_assert(c)                                                         \
+    do {                                                                      \
+        if (nxt_slow_path(!(c))) {                                            \
+            nxt_thread_log_alert("%s:%d assertion failed: %s",                \
+                                 __FILE__, __LINE__, #c);                     \
+            nxt_abort();                                                      \
+        }                                                                     \
+    } while (0)
+
 #else
 
 #define nxt_debug(...)
 
 #define                                                                       \
 nxt_log_debug(...)
+
+#define nxt_assert(c)
 
 #endif
 
@@ -142,11 +149,6 @@ nxt_log_debug(...)
 #define nxt_debug_alloc(...)
 
 #endif
-
-
-#define                                                                       \
-nxt_main_log_emerg(...)                                                       \
-    nxt_log_emerg(&nxt_main_log, __VA_ARGS__)
 
 
 #define                                                                       \
@@ -168,19 +170,6 @@ NXT_EXPORT extern nxt_uint_t  nxt_debug;
 NXT_EXPORT extern nxt_uint_t  nxt_trace;
 NXT_EXPORT extern nxt_log_t   nxt_main_log;
 NXT_EXPORT extern nxt_str_t   nxt_log_levels[];
-
-
-#define nxt_assert(c)                                                         \
-    do {                                                                      \
-        if (nxt_fast_path(c)) {                                               \
-            break;                                                            \
-                                                                              \
-        } else {                                                              \
-            nxt_thread_log_alert("%s:%d assertion failed: %s",                \
-                __FILE__, __LINE__, #c );                                     \
-            nxt_abort();                                                      \
-        }                                                                     \
-    } while (0)
 
 
 #endif /* _NXT_LOG_H_INCLUDED_ */

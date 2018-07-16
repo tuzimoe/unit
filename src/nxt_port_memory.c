@@ -20,7 +20,7 @@
 nxt_inline void
 nxt_port_mmap_handler_use(nxt_port_mmap_handler_t *mmap_handler, int i)
 {
-    int c;
+    int  c;
 
     c = nxt_atomic_fetch_add(&mmap_handler->use_count, i);
 
@@ -124,13 +124,7 @@ nxt_port_mmap_buf_completion(nxt_task_t *task, void *obj, void *data)
 
     mp = b->data;
 
-#if (NXT_DEBUG)
-    if (nxt_slow_path(data != b->parent)) {
-        nxt_log_alert(task->log, "completion data (%p) != b->parent (%p)",
-                      data, b->parent);
-        nxt_abort();
-    }
-#endif
+    nxt_assert(data == b->parent);
 
     mmap_handler = data;
     hdr = mmap_handler->hdr;
@@ -158,12 +152,12 @@ nxt_port_mmap_buf_completion(nxt_task_t *task, void *obj, void *data)
 
     nxt_port_mmap_free_junk(p, b->mem.end - p);
 
-    nxt_debug(task, "mmap buf completion: %p [%p,%d] (sent=%d), "
+    nxt_debug(task, "mmap buf completion: %p [%p,%uz] (sent=%d), "
               "%PI->%PI,%d,%d", b, b->mem.start, b->mem.end - b->mem.start,
               b->is_port_mmap_sent, hdr->src_pid, hdr->dst_pid, hdr->id, c);
 
     while (p < b->mem.end) {
-        nxt_port_mmap_set_chunk_free(hdr, c);
+        nxt_port_mmap_set_chunk_free(hdr->free_map, c);
 
         p += PORT_MMAP_CHUNK_SIZE;
         c++;
@@ -173,7 +167,8 @@ release_buf:
 
     nxt_port_mmap_handler_use(mmap_handler, -1);
 
-    nxt_mp_release(mp, b);
+    nxt_mp_free(mp, b);
+    nxt_mp_release(mp);
 }
 
 
@@ -220,6 +215,16 @@ nxt_port_incoming_port_mmap(nxt_task_t *task, nxt_process_t *process,
 
     mmap_handler->hdr = hdr;
 
+    if (nxt_slow_path(hdr->src_pid != process->pid
+                      || hdr->dst_pid != nxt_pid))
+    {
+        nxt_log(task, NXT_LOG_WARN, "unexpected pid in mmap header detected: "
+                "%PI != %PI or %PI != %PI", hdr->src_pid, process->pid,
+                hdr->dst_pid, nxt_pid);
+
+        return NULL;
+    }
+
     nxt_thread_mutex_lock(&process->incoming.mutex);
 
     port_mmap = nxt_port_mmap_at(&process->incoming, hdr->id);
@@ -234,9 +239,6 @@ nxt_port_incoming_port_mmap(nxt_task_t *task, nxt_process_t *process,
 
         goto fail;
     }
-
-    nxt_assert(hdr->src_pid == process->pid);
-    nxt_assert(hdr->dst_pid == nxt_pid);
 
     port_mmap->mmap_handler = mmap_handler;
     nxt_port_mmap_handler_use(mmap_handler, 1);
@@ -253,11 +255,13 @@ fail:
 
 static nxt_port_mmap_handler_t *
 nxt_port_new_port_mmap(nxt_task_t *task, nxt_process_t *process,
-    nxt_port_t *port)
+    nxt_port_t *port, nxt_int_t n, nxt_bool_t tracking)
 {
     void                     *mem;
     u_char                   *p, name[64];
     nxt_fd_t                 fd;
+    nxt_int_t                i;
+    nxt_free_map_t           *free_map;
     nxt_port_mmap_t          *port_mmap;
     nxt_port_mmap_header_t   *hdr;
     nxt_port_mmap_handler_t  *mmap_handler;
@@ -278,7 +282,7 @@ nxt_port_new_port_mmap(nxt_task_t *task, nxt_process_t *process,
         return NULL;
     }
 
-    p = nxt_sprintf(name, name + sizeof(name), "/unit.%PI.%uxD",
+    p = nxt_sprintf(name, name + sizeof(name), NXT_SHM_PREFIX "unit.%PI.%uxD",
                     nxt_pid, nxt_random(&task->thread->random));
     *p = '\0';
 
@@ -287,13 +291,24 @@ nxt_port_new_port_mmap(nxt_task_t *task, nxt_process_t *process,
     fd = syscall(SYS_memfd_create, name, MFD_CLOEXEC);
 
     if (nxt_slow_path(fd == -1)) {
-        nxt_log(task, NXT_LOG_CRIT, "memfd_create(%s) failed %E",
-                name, nxt_errno);
+        nxt_alert(task, "memfd_create(%s) failed %E", name, nxt_errno);
 
         goto remove_fail;
     }
 
     nxt_debug(task, "memfd_create(%s): %FD", name, fd);
+
+#elif (NXT_HAVE_SHM_OPEN_ANON)
+
+    fd = shm_open(SHM_ANON, O_RDWR, S_IRUSR | S_IWUSR);
+
+    nxt_debug(task, "shm_open(SHM_ANON): %FD", fd);
+
+    if (nxt_slow_path(fd == -1)) {
+        nxt_alert(task, "shm_open(SHM_ANON) failed %E", nxt_errno);
+
+        goto remove_fail;
+    }
 
 #elif (NXT_HAVE_SHM_OPEN)
 
@@ -305,7 +320,7 @@ nxt_port_new_port_mmap(nxt_task_t *task, nxt_process_t *process,
     nxt_debug(task, "shm_open(%s): %FD", name, fd);
 
     if (nxt_slow_path(fd == -1)) {
-        nxt_log(task, NXT_LOG_CRIT, "shm_open(%s) failed %E", name, nxt_errno);
+        nxt_alert(task, "shm_open(%s) failed %E", name, nxt_errno);
 
         goto remove_fail;
     }
@@ -342,6 +357,7 @@ nxt_port_new_port_mmap(nxt_task_t *task, nxt_process_t *process,
     hdr = mmap_handler->hdr;
 
     nxt_memset(hdr->free_map, 0xFFU, sizeof(hdr->free_map));
+    nxt_memset(hdr->free_tracking_map, 0xFFU, sizeof(hdr->free_tracking_map));
 
     hdr->id = process->outgoing.size - 1;
     hdr->src_pid = nxt_pid;
@@ -349,10 +365,15 @@ nxt_port_new_port_mmap(nxt_task_t *task, nxt_process_t *process,
     hdr->sent_over = port->id;
 
     /* Mark first chunk as busy */
-    nxt_port_mmap_set_chunk_busy(hdr, 0);
+    free_map = tracking ? hdr->free_tracking_map : hdr->free_map;
+
+    for (i = 0; i < n; i++) {
+        nxt_port_mmap_set_chunk_busy(free_map, i);
+    }
 
     /* Mark as busy chunk followed the last available chunk. */
-    nxt_port_mmap_set_chunk_busy(hdr, PORT_MMAP_CHUNK_COUNT);
+    nxt_port_mmap_set_chunk_busy(hdr->free_map, PORT_MMAP_CHUNK_COUNT);
+    nxt_port_mmap_set_chunk_busy(hdr->free_tracking_map, PORT_MMAP_CHUNK_COUNT);
 
     nxt_debug(task, "send mmap fd %FD to process %PI", fd, port->pid);
 
@@ -376,9 +397,11 @@ remove_fail:
 
 static nxt_port_mmap_handler_t *
 nxt_port_mmap_get(nxt_task_t *task, nxt_port_t *port, nxt_chunk_id_t *c,
-    size_t size)
+    nxt_int_t n, nxt_bool_t tracking)
 {
+    nxt_int_t                i, res, nchunks;
     nxt_process_t            *process;
+    nxt_free_map_t           *free_map;
     nxt_port_mmap_t          *port_mmap;
     nxt_port_mmap_t          *end_port_mmap;
     nxt_port_mmap_header_t   *hdr;
@@ -388,8 +411,6 @@ nxt_port_mmap_get(nxt_task_t *task, nxt_port_t *port, nxt_chunk_id_t *c,
     if (nxt_slow_path(process == NULL)) {
         return NULL;
     }
-
-    *c = 0;
 
     nxt_thread_mutex_lock(&process->outgoing.mutex);
 
@@ -406,14 +427,39 @@ nxt_port_mmap_get(nxt_task_t *task, nxt_port_t *port, nxt_chunk_id_t *c,
             continue;
         }
 
-        if (nxt_port_mmap_get_free_chunk(hdr, c)) {
-            goto unlock_return;
+        *c = 0;
+
+        free_map = tracking ? hdr->free_tracking_map : hdr->free_map;
+
+        while (nxt_port_mmap_get_free_chunk(free_map, c)) {
+            nchunks = 1;
+
+            while (nchunks < n) {
+                res = nxt_port_mmap_chk_set_chunk_busy(free_map, *c + nchunks);
+
+                if (res == 0) {
+                    for (i = 0; i < nchunks; i++) {
+                        nxt_port_mmap_set_chunk_free(free_map, *c + i);
+                    }
+
+                    *c += nchunks + 1;
+                    nchunks = 0;
+                    break;
+                }
+
+                nchunks++;
+            }
+
+            if (nchunks == n) {
+                goto unlock_return;
+            }
         }
     }
 
     /* TODO introduce port_mmap limit and release wait. */
 
-    mmap_handler = nxt_port_new_port_mmap(task, process, port);
+    *c = 0;
+    mmap_handler = nxt_port_new_port_mmap(task, process, port, n, tracking);
 
 unlock_return:
 
@@ -434,12 +480,15 @@ nxt_port_get_port_incoming_mmap(nxt_task_t *task, nxt_pid_t spid, uint32_t id)
         return NULL;
     }
 
-    mmap_handler = NULL;
-
     nxt_thread_mutex_lock(&process->incoming.mutex);
 
     if (nxt_fast_path(process->incoming.size > id)) {
         mmap_handler = process->incoming.elts[id].mmap_handler;
+
+    } else {
+        mmap_handler = NULL;
+
+        nxt_debug(task, "invalid incoming mmap id %uD for pid %PI", id, spid);
     }
 
     nxt_thread_mutex_unlock(&process->incoming.mutex);
@@ -448,16 +497,156 @@ nxt_port_get_port_incoming_mmap(nxt_task_t *task, nxt_pid_t spid, uint32_t id)
 }
 
 
+nxt_int_t
+nxt_port_mmap_get_tracking(nxt_task_t *task, nxt_port_t *port,
+    nxt_port_mmap_tracking_t *tracking, uint32_t stream)
+{
+    nxt_chunk_id_t           c;
+    nxt_port_mmap_header_t   *hdr;
+    nxt_port_mmap_handler_t  *mmap_handler;
+
+    nxt_debug(task, "request tracking for stream #%uD", stream);
+
+    mmap_handler = nxt_port_mmap_get(task, port, &c, 1, 1);
+    if (nxt_slow_path(mmap_handler == NULL)) {
+        return NXT_ERROR;
+    }
+
+    nxt_port_mmap_handler_use(mmap_handler, 1);
+
+    hdr = mmap_handler->hdr;
+
+    tracking->mmap_handler = mmap_handler;
+    tracking->tracking = hdr->tracking + c;
+
+    *tracking->tracking = stream;
+
+    nxt_debug(task, "outgoing tracking allocation: %PI->%PI,%d,%d",
+              hdr->src_pid, hdr->dst_pid, hdr->id, c);
+
+    return NXT_OK;
+}
+
+
+nxt_bool_t
+nxt_port_mmap_tracking_cancel(nxt_task_t *task,
+    nxt_port_mmap_tracking_t *tracking, uint32_t stream)
+{
+    nxt_bool_t               res;
+    nxt_chunk_id_t           c;
+    nxt_port_mmap_header_t   *hdr;
+    nxt_port_mmap_handler_t  *mmap_handler;
+
+    mmap_handler = tracking->mmap_handler;
+
+    if (nxt_slow_path(mmap_handler == NULL)) {
+        return 0;
+    }
+
+    hdr = mmap_handler->hdr;
+
+    res = nxt_atomic_cmp_set(tracking->tracking, stream, 0);
+
+    nxt_debug(task, "%s tracking for stream #%uD",
+              (res ? "cancelled" : "failed to cancel"), stream);
+
+    if (!res) {
+        c = tracking->tracking - hdr->tracking;
+        nxt_port_mmap_set_chunk_free(hdr->free_tracking_map, c);
+    }
+
+    nxt_port_mmap_handler_use(mmap_handler, -1);
+
+    return res;
+}
+
+
+nxt_int_t
+nxt_port_mmap_tracking_write(uint32_t *buf, nxt_port_mmap_tracking_t *t)
+{
+    nxt_port_mmap_handler_t  *mmap_handler;
+
+    mmap_handler = t->mmap_handler;
+
+#if (NXT_DEBUG)
+    {
+    nxt_atomic_t  *tracking;
+
+    tracking = mmap_handler->hdr->tracking;
+
+    nxt_assert(t->tracking >= tracking);
+    nxt_assert(t->tracking < tracking + PORT_MMAP_CHUNK_COUNT);
+    }
+#endif
+
+    buf[0] = mmap_handler->hdr->id;
+    buf[1] = t->tracking - mmap_handler->hdr->tracking;
+
+    return NXT_OK;
+}
+
+nxt_bool_t
+nxt_port_mmap_tracking_read(nxt_task_t *task, nxt_port_recv_msg_t *msg)
+{
+    nxt_buf_t                     *b;
+    nxt_bool_t                    res;
+    nxt_chunk_id_t                c;
+    nxt_port_mmap_header_t        *hdr;
+    nxt_port_mmap_handler_t       *mmap_handler;
+    nxt_port_mmap_tracking_msg_t  *tracking_msg;
+
+    b = msg->buf;
+
+    if (nxt_buf_used_size(b) < (int) sizeof(nxt_port_mmap_tracking_msg_t)) {
+        nxt_debug(task, "too small message %O", nxt_buf_used_size(b));
+        return 0;
+    }
+
+    tracking_msg = (nxt_port_mmap_tracking_msg_t *) b->mem.pos;
+
+    b->mem.pos += sizeof(nxt_port_mmap_tracking_msg_t);
+    mmap_handler = nxt_port_get_port_incoming_mmap(task, msg->port_msg.pid,
+                                                   tracking_msg->mmap_id);
+
+    if (nxt_slow_path(mmap_handler == NULL)) {
+        return 0;
+    }
+
+    hdr = mmap_handler->hdr;
+
+    c = tracking_msg->tracking_id;
+    res = nxt_atomic_cmp_set(hdr->tracking + c, msg->port_msg.stream, 0);
+
+    nxt_debug(task, "tracking for stream #%uD %s", msg->port_msg.stream,
+              (res ? "received" : "already cancelled"));
+
+    if (!res) {
+        nxt_port_mmap_set_chunk_free(hdr->free_tracking_map, c);
+    }
+
+    return res;
+}
+
+
 nxt_buf_t *
 nxt_port_mmap_get_buf(nxt_task_t *task, nxt_port_t *port, size_t size)
 {
-    size_t                   nchunks;
+    nxt_mp_t                 *mp;
     nxt_buf_t                *b;
+    nxt_int_t                nchunks;
     nxt_chunk_id_t           c;
     nxt_port_mmap_header_t   *hdr;
     nxt_port_mmap_handler_t  *mmap_handler;
 
     nxt_debug(task, "request %z bytes shm buffer", size);
+
+    nchunks = (size + PORT_MMAP_CHUNK_SIZE - 1) / PORT_MMAP_CHUNK_SIZE;
+
+    if (nxt_slow_path(nchunks > PORT_MMAP_CHUNK_COUNT)) {
+        nxt_alert(task, "requested buffer (%z) too big", size);
+
+        return NULL;
+    }
 
     b = nxt_buf_mem_ts_alloc(task, task->thread->engine->mem_pool, 0);
     if (nxt_slow_path(b == NULL)) {
@@ -467,9 +656,11 @@ nxt_port_mmap_get_buf(nxt_task_t *task, nxt_port_t *port, size_t size)
     b->completion_handler = nxt_port_mmap_buf_completion;
     nxt_buf_set_port_mmap(b);
 
-    mmap_handler = nxt_port_mmap_get(task, port, &c, size);
+    mmap_handler = nxt_port_mmap_get(task, port, &c, nchunks, 0);
     if (nxt_slow_path(mmap_handler == NULL)) {
-        nxt_mp_release(task->thread->engine->mem_pool, b);
+        mp = task->thread->engine->mem_pool;
+        nxt_mp_free(mp, b);
+        nxt_mp_release(mp);
         return NULL;
     }
 
@@ -482,31 +673,11 @@ nxt_port_mmap_get_buf(nxt_task_t *task, nxt_port_t *port, size_t size)
     b->mem.start = nxt_port_mmap_chunk_start(hdr, c);
     b->mem.pos = b->mem.start;
     b->mem.free = b->mem.start;
-    b->mem.end = b->mem.start + PORT_MMAP_CHUNK_SIZE;
+    b->mem.end = b->mem.start + nchunks * PORT_MMAP_CHUNK_SIZE;
 
-    nchunks = size / PORT_MMAP_CHUNK_SIZE;
-    if ((size % PORT_MMAP_CHUNK_SIZE) != 0 || nchunks == 0) {
-        nchunks++;
-    }
-
-    nxt_debug(task, "outgoing mmap buf allocation: %p [%p,%d] %PI->%PI,%d,%d",
+    nxt_debug(task, "outgoing mmap buf allocation: %p [%p,%uz] %PI->%PI,%d,%d",
               b, b->mem.start, b->mem.end - b->mem.start,
               hdr->src_pid, hdr->dst_pid, hdr->id, c);
-
-    c++;
-    nchunks--;
-
-    /* Try to acquire as much chunks as required. */
-    while (nchunks > 0) {
-
-        if (nxt_port_mmap_chk_set_chunk_busy(hdr, c) == 0) {
-            break;
-        }
-
-        b->mem.end += PORT_MMAP_CHUNK_SIZE;
-        c++;
-        nchunks--;
-    }
 
     return b;
 }
@@ -542,17 +713,14 @@ nxt_port_mmap_increase_buf(nxt_task_t *task, nxt_buf_t *b, size_t size,
 
     size -= free_size;
 
-    nchunks = size / PORT_MMAP_CHUNK_SIZE;
-    if ((size % PORT_MMAP_CHUNK_SIZE) != 0 || nchunks == 0) {
-        nchunks++;
-    }
+    nchunks = (size + PORT_MMAP_CHUNK_SIZE - 1) / PORT_MMAP_CHUNK_SIZE;
 
     c = start;
 
     /* Try to acquire as much chunks as required. */
     while (nchunks > 0) {
 
-        if (nxt_port_mmap_chk_set_chunk_busy(hdr, c) == 0) {
+        if (nxt_port_mmap_chk_set_chunk_busy(hdr->free_map, c) == 0) {
             break;
         }
 
@@ -565,11 +733,11 @@ nxt_port_mmap_increase_buf(nxt_task_t *task, nxt_buf_t *b, size_t size,
     {
         c--;
         while (c >= start) {
-            nxt_port_mmap_set_chunk_free(hdr, c);
+            nxt_port_mmap_set_chunk_free(hdr->free_map, c);
             c--;
         }
 
-        nxt_debug(task, "failed to increase, %d chunks busy", nchunks);
+        nxt_debug(task, "failed to increase, %uz chunks busy", nchunks);
 
         return NXT_ERROR;
 
@@ -620,7 +788,7 @@ nxt_port_mmap_get_incoming_buf(nxt_task_t *task, nxt_port_t *port,
     b->parent = mmap_handler;
     nxt_port_mmap_handler_use(mmap_handler, 1);
 
-    nxt_debug(task, "incoming mmap buf allocation: %p [%p,%d] %PI->%PI,%d,%d",
+    nxt_debug(task, "incoming mmap buf allocation: %p [%p,%uz] %PI->%PI,%d,%d",
               b, b->mem.start, b->mem.end - b->mem.start,
               hdr->src_pid, hdr->dst_pid, hdr->id, mmap_msg->chunk_id);
 
@@ -683,40 +851,41 @@ nxt_port_mmap_write(nxt_task_t *task, nxt_port_t *port,
 
 
 void
-nxt_port_mmap_read(nxt_task_t *task, nxt_port_t *port,
-    nxt_port_recv_msg_t *msg)
+nxt_port_mmap_read(nxt_task_t *task, nxt_port_recv_msg_t *msg)
 {
     nxt_buf_t            *b, **pb;
     nxt_port_mmap_msg_t  *end, *mmap_msg;
 
-    b = msg->buf;
-
-    mmap_msg = (nxt_port_mmap_msg_t *) b->mem.pos;
-    end = (nxt_port_mmap_msg_t *) b->mem.free;
-
     pb = &msg->buf;
     msg->size = 0;
 
-    while (mmap_msg < end) {
-        nxt_debug(task, "mmap_msg={%D, %D, %D} from %PI",
-                  mmap_msg->mmap_id, mmap_msg->chunk_id, mmap_msg->size,
-                  msg->port_msg.pid);
+    for (b = msg->buf; b != NULL; b = b->next) {
 
-        *pb = nxt_port_mmap_get_incoming_buf(task, port, msg->port_msg.pid,
-                                             mmap_msg);
-        if (nxt_slow_path(*pb == NULL)) {
-            nxt_log_error(NXT_LOG_ERR, task->log, "failed to get mmap buffer");
+        mmap_msg = (nxt_port_mmap_msg_t *) b->mem.pos;
+        end = (nxt_port_mmap_msg_t *) b->mem.free;
 
-            break;
+        while (mmap_msg < end) {
+            nxt_debug(task, "mmap_msg={%D, %D, %D} from %PI",
+                      mmap_msg->mmap_id, mmap_msg->chunk_id, mmap_msg->size,
+                      msg->port_msg.pid);
+
+            *pb = nxt_port_mmap_get_incoming_buf(task, msg->port,
+                                                 msg->port_msg.pid, mmap_msg);
+            if (nxt_slow_path(*pb == NULL)) {
+                nxt_log_error(NXT_LOG_ERR, task->log,
+                              "failed to get mmap buffer");
+
+                break;
+            }
+
+            msg->size += mmap_msg->size;
+            pb = &(*pb)->next;
+            mmap_msg++;
+
+            /* Mark original buf as complete. */
+            b->mem.pos += sizeof(nxt_port_mmap_msg_t);
         }
-
-        msg->size += mmap_msg->size;
-        pb = &(*pb)->next;
-        mmap_msg++;
     }
-
-    /* Mark original buf as complete. */
-    b->mem.pos += nxt_buf_used_size(b);
 }
 
 
@@ -729,7 +898,7 @@ nxt_port_mmap_get_method(nxt_task_t *task, nxt_port_t *port, nxt_buf_t *b)
 
     m = NXT_PORT_METHOD_ANY;
 
-    for (; b != NULL; b = b->next) {
+    for (/* void */; b != NULL; b = b->next) {
         if (nxt_buf_used_size(b) == 0) {
             /* empty buffers does not affect method */
             continue;

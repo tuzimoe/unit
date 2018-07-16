@@ -8,6 +8,8 @@
 
 
 static void nxt_port_write_handler(nxt_task_t *task, void *obj, void *data);
+static nxt_buf_t *nxt_port_buf_completion(nxt_task_t *task,
+    nxt_work_queue_t *wq, nxt_buf_t *b, size_t sent, nxt_bool_t mmap_mode);
 static void nxt_port_read_handler(nxt_task_t *task, void *obj, void *data);
 static void nxt_port_read_msg_process(nxt_task_t *task, nxt_port_t *port,
     nxt_port_recv_msg_t *msg);
@@ -116,10 +118,10 @@ nxt_port_write_enable(nxt_task_t *task, nxt_port_t *port)
     port->socket.error_handler = nxt_port_error_handler;
 
     if (port->iov == NULL) {
-        port->iov = nxt_mp_get(port->mem_pool, sizeof(struct iovec) *
-                               NXT_IOBUF_MAX * 10);
-        port->mmsg_buf = nxt_mp_get(port->mem_pool, sizeof(uint32_t) * 3 *
-                                    NXT_IOBUF_MAX * 10);
+        port->iov = nxt_mp_get(port->mem_pool,
+                               sizeof(struct iovec) * NXT_IOBUF_MAX * 10);
+        port->mmsg_buf = nxt_mp_get(port->mem_pool,
+                                    sizeof(uint32_t) * 3 * NXT_IOBUF_MAX * 10);
     }
 }
 
@@ -141,13 +143,7 @@ nxt_port_release_send_msg(nxt_task_t *task, void *obj, void *data)
     msg = obj;
     engine = data;
 
-#if (NXT_DEBUG)
-    if (nxt_slow_path(data != msg->work.data)) {
-        nxt_log_alert(task->log, "release msg data (%p) != msg->engine (%p)",
-                      data, msg->work.data);
-        nxt_abort();
-    }
-#endif
+    nxt_assert(data == msg->work.data);
 
     if (engine != task->thread->engine) {
 
@@ -159,20 +155,25 @@ nxt_port_release_send_msg(nxt_task_t *task, void *obj, void *data)
         return;
     }
 
-    nxt_mp_release(engine->mem_pool, obj);
+    nxt_mp_free(engine->mem_pool, obj);
+    nxt_mp_release(engine->mem_pool);
 }
 
 
 static nxt_port_send_msg_t *
 nxt_port_msg_create(nxt_task_t *task, nxt_port_send_msg_t *m)
 {
+    nxt_mp_t             *mp;
     nxt_port_send_msg_t  *msg;
 
-    msg = nxt_mp_retain(task->thread->engine->mem_pool,
-                        sizeof(nxt_port_send_msg_t));
+    mp = task->thread->engine->mem_pool;
+
+    msg = nxt_mp_alloc(mp, sizeof(nxt_port_send_msg_t));
     if (nxt_slow_path(msg == NULL)) {
         return NULL;
     }
+
+    nxt_mp_retain(mp);
 
     msg->link.next = NULL;
     msg->link.prev = NULL;
@@ -223,8 +224,9 @@ nxt_port_msg_first(nxt_task_t *task, nxt_port_t *port, nxt_port_send_msg_t *msg)
 
 
 nxt_int_t
-nxt_port_socket_write(nxt_task_t *task, nxt_port_t *port, nxt_uint_t type,
-    nxt_fd_t fd, uint32_t stream, nxt_port_id_t reply_port, nxt_buf_t *b)
+nxt_port_socket_twrite(nxt_task_t *task, nxt_port_t *port, nxt_uint_t type,
+    nxt_fd_t fd, uint32_t stream, nxt_port_id_t reply_port, nxt_buf_t *b,
+    void *tracking)
 {
     nxt_port_send_msg_t  msg, *res;
 
@@ -236,6 +238,10 @@ nxt_port_socket_write(nxt_task_t *task, nxt_port_t *port, nxt_uint_t type,
     msg.close_fd = (type & NXT_PORT_MSG_CLOSE_FD) != 0;
     msg.share = 0;
 
+    if (tracking != NULL) {
+        nxt_port_mmap_tracking_write(msg.tracking_msg, tracking);
+    }
+
     msg.port_msg.stream = stream;
     msg.port_msg.pid = nxt_pid;
     msg.port_msg.reply_port = reply_port;
@@ -244,6 +250,7 @@ nxt_port_socket_write(nxt_task_t *task, nxt_port_t *port, nxt_uint_t type,
     msg.port_msg.mmap = 0;
     msg.port_msg.nf = 0;
     msg.port_msg.mf = 0;
+    msg.port_msg.tracking = tracking != NULL;
 
     msg.work.data = NULL;
 
@@ -337,6 +344,10 @@ nxt_port_write_handler(nxt_task_t *task, void *obj, void *data)
                               port->max_size / PORT_MMAP_MIN_SIZE);
         }
 
+        if (msg->port_msg.tracking) {
+            iov[0].iov_len += sizeof(msg->tracking_msg);
+        }
+
         nxt_sendbuf_mem_coalesce(task, &sb);
 
         plain_size = sb.size;
@@ -359,9 +370,8 @@ nxt_port_write_handler(nxt_task_t *task, void *obj, void *data)
 
         if (n > 0) {
             if (nxt_slow_path((size_t) n != sb.size + iov[0].iov_len)) {
-                nxt_log(task, NXT_LOG_CRIT,
-                        "port %d: short write: %z instead of %uz",
-                        port->socket.fd, n, sb.size + iov[0].iov_len);
+                nxt_alert(task, "port %d: short write: %z instead of %uz",
+                          port->socket.fd, n, sb.size + iov[0].iov_len);
                 goto fail;
             }
 
@@ -371,7 +381,7 @@ nxt_port_write_handler(nxt_task_t *task, void *obj, void *data)
                 msg->fd = -1;
             }
 
-            msg->buf = nxt_sendbuf_completion(task, wq, msg->buf, plain_size,
+            msg->buf = nxt_port_buf_completion(task, wq, msg->buf, plain_size,
                                               m == NXT_PORT_METHOD_MMAP);
 
             if (msg->buf != NULL) {
@@ -385,6 +395,7 @@ nxt_port_write_handler(nxt_task_t *task, void *obj, void *data)
                 msg->fd = -1;
                 msg->share += n;
                 msg->port_msg.nf = 1;
+                msg->port_msg.tracking = 0;
 
                 if (msg->share >= port->max_share) {
                     msg->share = 0;
@@ -450,6 +461,67 @@ unlock_mutex:
     if (use_delta != 0) {
         nxt_port_use(task, port, use_delta);
     }
+}
+
+
+static nxt_buf_t *
+nxt_port_buf_completion(nxt_task_t *task, nxt_work_queue_t *wq, nxt_buf_t *b,
+    size_t sent, nxt_bool_t mmap_mode)
+{
+    size_t  size;
+
+    while (b != NULL) {
+
+        nxt_prefetch(b->next);
+
+        if (!nxt_buf_is_sync(b)) {
+
+            size = nxt_buf_used_size(b);
+
+            if (size != 0) {
+
+                if (sent == 0) {
+                    break;
+                }
+
+                if (nxt_buf_is_port_mmap(b) && mmap_mode) {
+                    /*
+                     * buffer has been sent to other side which is now
+                     * responsible for shared memory bucket release
+                     */
+                    b->is_port_mmap_sent = 1;
+                }
+
+                if (sent < size) {
+
+                    if (nxt_buf_is_mem(b)) {
+                        b->mem.pos += sent;
+                    }
+
+                    if (nxt_buf_is_file(b)) {
+                        b->file_pos += sent;
+                    }
+
+                    break;
+                }
+
+                /* b->mem.free is NULL in file-only buffer. */
+                b->mem.pos = b->mem.free;
+
+                if (nxt_buf_is_file(b)) {
+                    b->file_pos = b->file_end;
+                }
+
+                sent -= size;
+            }
+        }
+
+        nxt_work_queue_add(wq, b->completion_handler, task, b, b->parent);
+
+        b = b->next;
+    }
+
+    return b;
 }
 
 
@@ -572,7 +644,7 @@ nxt_port_lvlhsh_frag_alloc(void *ctx, size_t size)
 static void
 nxt_port_lvlhsh_frag_free(void *ctx, void *p)
 {
-    return nxt_mp_free(ctx, p);
+    nxt_mp_free(ctx, p);
 }
 
 
@@ -660,7 +732,7 @@ nxt_port_frag_find(nxt_task_t *task, nxt_port_t *port, uint32_t stream,
         return lhq.value;
 
     default:
-        nxt_log(task, NXT_LOG_WARN, "frag stream #%uD not found", stream);
+        nxt_log(task, NXT_LOG_INFO, "frag stream #%uD not found", stream);
 
         return NULL;
     }
@@ -675,9 +747,14 @@ nxt_port_read_msg_process(nxt_task_t *task, nxt_port_t *port,
     nxt_port_recv_msg_t  *fmsg;
 
     if (nxt_slow_path(msg->size < sizeof(nxt_port_msg_t))) {
-        nxt_log(task, NXT_LOG_CRIT,
-                "port %d: too small message:%uz", port->socket.fd, msg->size);
-        goto fail;
+        nxt_alert(task, "port %d: too small message:%uz",
+                  port->socket.fd, msg->size);
+
+        if (msg->fd != -1) {
+            nxt_fd_close(msg->fd);
+        }
+
+        return;
     }
 
     /* adjust size to actual buffer used size */
@@ -686,54 +763,89 @@ nxt_port_read_msg_process(nxt_task_t *task, nxt_port_t *port,
     b = orig_b = msg->buf;
     b->mem.free += msg->size;
 
-    if (msg->port_msg.mmap) {
-        nxt_port_mmap_read(task, port, msg);
-        b = msg->buf;
+    if (msg->port_msg.tracking) {
+        msg->cancelled = nxt_port_mmap_tracking_read(task, msg) == 0;
+
+    } else {
+        msg->cancelled = 0;
     }
 
     if (nxt_slow_path(msg->port_msg.nf != 0)) {
+
         fmsg = nxt_port_frag_find(task, port, msg->port_msg.stream,
                                   msg->port_msg.mf == 0);
 
         if (nxt_slow_path(fmsg == NULL)) {
-            nxt_assert(fmsg != NULL);
+            goto fmsg_failed;
         }
 
-        nxt_buf_chain_add(&fmsg->buf, msg->buf);
+        if (nxt_fast_path(fmsg->cancelled == 0)) {
 
-        fmsg->size += msg->size;
+            if (msg->port_msg.mmap) {
+                nxt_port_mmap_read(task, msg);
+            }
 
-        msg->buf = NULL;
-        b = NULL;
+            nxt_buf_chain_add(&fmsg->buf, msg->buf);
+
+            fmsg->size += msg->size;
+            msg->buf = NULL;
+            b = NULL;
+
+            if (nxt_fast_path(msg->port_msg.mf == 0)) {
+
+                b = fmsg->buf;
+
+                port->handler(task, fmsg);
+
+                msg->buf = fmsg->buf;
+                msg->fd = fmsg->fd;
+            }
+        }
 
         if (nxt_fast_path(msg->port_msg.mf == 0)) {
-            b = fmsg->buf;
-
-            port->handler(task, fmsg);
-
-            msg->buf = fmsg->buf;
-            msg->fd = fmsg->fd;
-
             nxt_mp_free(port->mem_pool, fmsg);
         }
     } else {
         if (nxt_slow_path(msg->port_msg.mf != 0)) {
+
+            if (msg->port_msg.mmap && msg->cancelled == 0) {
+                nxt_port_mmap_read(task, msg);
+                b = msg->buf;
+            }
+
             fmsg = nxt_port_frag_start(task, port, msg);
 
             if (nxt_slow_path(fmsg == NULL)) {
-                nxt_assert(fmsg != NULL);
+                goto fmsg_failed;
             }
 
             fmsg->port_msg.nf = 0;
             fmsg->port_msg.mf = 0;
 
-            msg->buf = NULL;
-            msg->fd = -1;
-            b = NULL;
+            if (nxt_fast_path(msg->cancelled == 0)) {
+                msg->buf = NULL;
+                msg->fd = -1;
+                b = NULL;
+
+            } else {
+                if (msg->fd != -1) {
+                    nxt_fd_close(msg->fd);
+                }
+            }
         } else {
-            port->handler(task, msg);
+            if (nxt_fast_path(msg->cancelled == 0)) {
+
+                if (msg->port_msg.mmap) {
+                    nxt_port_mmap_read(task, msg);
+                    b = msg->buf;
+                }
+
+                port->handler(task, msg);
+            }
         }
     }
+
+fmsg_failed:
 
     if (msg->port_msg.mmap && orig_b != b) {
 
@@ -753,14 +865,6 @@ nxt_port_read_msg_process(nxt_task_t *task, nxt_port_t *port,
 
         /* restore original buf */
         msg->buf = orig_b;
-    }
-
-    return;
-
-fail:
-
-    if (msg->fd != -1) {
-        nxt_fd_close(msg->fd);
     }
 }
 
@@ -822,7 +926,7 @@ nxt_port_error_handler(nxt_task_t *task, void *obj, void *data)
 
     nxt_queue_each(msg, &port->messages, nxt_port_send_msg_t, link) {
 
-        for(b = msg->buf; b != NULL; b = b->next) {
+        for (b = msg->buf; b != NULL; b = b->next) {
             if (nxt_buf_is_sync(b)) {
                 continue;
             }

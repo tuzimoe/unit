@@ -335,10 +335,10 @@ nxt_fastcgi_next_param(nxt_fastcgi_source_t *fs, nxt_fastcgi_param_t *param)
     nxt_int_t  ret;
 
     enum {
-         sw_name_length = 0,
-         sw_value_length,
-         sw_name,
-         sw_value,
+        sw_name_length = 0,
+        sw_value_length,
+        sw_name,
+        sw_value,
     };
 
     switch (fs->state) {
@@ -424,7 +424,7 @@ nxt_fastcgi_source_record_filter(nxt_task_t *task, void *obj, void *data)
     for (b = fsr->parse.out[1]; b != NULL; b = b->next) {
 
         for (p = b->mem.free - 1; p >= b->mem.pos; p--) {
-            if (*p != NXT_CR && *p != NXT_LF) {
+            if (*p != '\r' && *p != '\n') {
                 break;
             }
         }
